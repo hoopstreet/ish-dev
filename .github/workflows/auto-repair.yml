@@ -1,10 +1,11 @@
-name: V14 CI
+name: Auto Repair CI
 
 on: [push]
 
 jobs:
-  build:
+  repair:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - run: echo "V14 SYSTEM ACTIVE"
+      - name: Run check
+        run: echo "V13 CI ACTIVE"

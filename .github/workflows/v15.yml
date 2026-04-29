@@ -1,0 +1,11 @@
+name: V15 Autonomous CI
+
+on: [push]
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: echo "V15 EVOLUTION ACTIVE"
+      - run: python3 -m compileall .

@@ -1,0 +1,21 @@
+#!/bin/sh
+
+while true; do
+clear
+echo "==== HOOPSTREET V15 SELF-WRITING OS ===="
+echo "1. AI Engine"
+echo "2. Self Writer"
+echo "3. Evolution Mode"
+echo "4. Git Sync"
+echo "0. Exit"
+
+read c
+
+case $c in
+1) python3 core/engine.py ;;
+2) python3 core/self_writer.py ;;
+3) python3 core/evolver.py ;;
+4) sh system/sync.sh ;;
+0) exit ;;
+esac
+done

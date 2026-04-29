@@ -1,85 +1,64 @@
 #!/usr/bin/env python3
-import os, subprocess, time, datetime
+import subprocess, os, time
+from ai_engine import fix_code
 
-MEMORY = "/root/ish-dev/memory/history.log"
-REPO = "/root/ish-dev"
+def run_script(code):
+    tmp = "/tmp/run.sh"
+    with open(tmp, "w") as f:
+        f.write(code)
 
-def save_memory(code):
-    with open(MEMORY, "a") as f:
-        f.write("\n==== " + str(datetime.datetime.now()) + " ====\n")
-        f.write(code + "\n")
+    result = subprocess.run(
+        ["sh", tmp],
+        capture_output=True,
+        text=True
+    )
+
+    return result.returncode, result.stdout, result.stderr
 
 def git_sync():
     try:
-        os.chdir(REPO)
-        subprocess.call(["git", "add", "."])
-        subprocess.call(["git", "commit", "-m", "auto-sync " + str(time.time())])
-        subprocess.call(["git", "push"])
-        print("🔄 Auto Git Sync Complete")
+        os.chdir("/root/ish-dev")
+        subprocess.call(["git","add","."])
+        subprocess.call(["git","commit","-m","auto"])
+        subprocess.call(["git","push"])
+        print("🔄 Synced")
     except:
-        print("⚠️ Git sync skipped")
+        print("⚠️ Git skipped")
 
-def split_phases(code):
-    phases, current = [], []
-    for line in code.split("\n"):
-        if line.lower().startswith("# phase"):
-            if current:
-                phases.append("\n".join(current))
-                current = []
-        current.append(line)
-    if current:
-        phases.append("\n".join(current))
-    return phases
-
-def run():
-    print("\n🚀 HOOPSTREET V10\n")
-    print("Paste code (END to run):\n")
+def main():
+    print("\n💎 HOOPSTREET V12 AI SYSTEM\n")
+    print("Paste code (END to run):")
 
     lines = []
     while True:
-        try:
-            l = input()
-            if l.strip() == "END":
-                break
-            lines.append(l)
-        except:
+        l = input()
+        if l.strip() == "END":
             break
+        lines.append(l)
 
     code = "\n".join(lines)
 
-    save_memory(code)
+    for attempt in range(5):
+        print(f"\n⚙️ Attempt {attempt+1}")
 
-    phases = split_phases(code)
-    print(f"\n📊 {len(phases)} phase(s)\n")
+        rc, out, err = run_script(code)
 
-    for i, p in enumerate(phases, 1):
-        print(f"\n=== PHASE {i} ===\n")
+        if rc == 0:
+            print("✅ SUCCESS")
+            print(out)
+            git_sync()
+            return
 
-        tmp = f"/tmp/p{i}.sh"
-        with open(tmp, "w") as f:
-            f.write(p)
+        print("❌ ERROR:")
+        print(err)
 
-        result = subprocess.call(["sh", tmp])
+        fixed = fix_code(code, err)
 
-        if result != 0:
-            print(f"\n❌ Phase {i} failed\n")
-            print("🤖 Attempting auto-fix...")
+        if not fixed:
+            print("⚠️ AI failed")
+            return
 
-            # simple AI debug (basic fallback)
-            fixed = p.replace("pip install", "pip3 install")
-            with open(tmp, "w") as f:
-                f.write(fixed)
+        print("🤖 Applying AI fix...")
+        code = fixed
 
-            retry = subprocess.call(["sh", tmp])
-
-            if retry != 0:
-                print("❌ Auto-fix failed. Stopping.")
-                return
-
-        os.remove(tmp)
-
-    print("\n✅ DONE\n")
-    git_sync()
-
-if __name__ == "__main__":
-    run()
+    print("❌ FAILED AFTER RETRIES")
