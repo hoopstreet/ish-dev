@@ -1,103 +1,104 @@
-name: 🤖 Hoopstreet AI Sync
+name: 🏀 Hoopstreet State-Aware Sync
 
 on:
   push:
     paths:
-      - 'steps.md' # Triggers when you update your instructions
-  workflow_dispatch: # Allows manual trigger
+      - 'steps.md'
+  workflow_dispatch:
 
 jobs:
-  ai-update:
+  hoopstreet-sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
+      - name: Install Python Requests
         run: pip install requests
 
-      - name: Run AI Agent Sync
+      - name: AI Logic Engine (OpenRouter)
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           python << 'EOF'
           import os, requests, json, datetime
 
-          # 1. READ STEPS & CONTEXT
-          with open('steps.md', 'r') as f:
-              steps = f.read()
+          # 1. LOAD SYSTEM STATE
+          def read_file(path):
+              return open(path, 'r').read() if os.path.exists(path) else ""
+
+          steps_content = read_file('steps.md')
+          roadmap_content = read_file('ROADMAP.md')
+          dna_content = read_file('DNA.md')
+          logs_content = read_file('logs.txt')
           
-          # Get file list for context
-          file_list = os.listdir('.')
-          
+          # 2. CONSTRUCT ARCHITECT PROMPT
           prompt = f"""
-          You are the Hoopstreet iSH Architect. 
-          Current Files: {file_list}
-          Instructions: {steps}
+          You are the Hoopstreet Master Architect. 
           
+          INSTRUCTIONS (steps.md):
+          {steps_content}
+
+          CURRENT STATE:
+          - ROADMAP.md: {roadmap_content}
+          - DNA.md: {dna_content}
+          - logs.txt: {logs_content}
+
           TASK:
-          1. Analyze the changes in steps.md.
-          2. Generate a JSON response with:
-             - "updates": A list of files to update/create with their FULL content.
-             - "dna_entry": A short summary for DNA.md (v8.0.x style).
-             - "roadmap_status": Any updates for the ROADMAP.md phases.
-          3. If a file mentioned in steps is missing, CREATE the code for it.
+          1. Identify any "Phase" or "Feature" in steps.md that is NOT yet reflected in ROADMAP.md or DNA.md.
+          2. If steps.md mentions a script/code that is missing from the repo, generate the full code.
+          3. Generate the specific updates needed to synchronize these files.
           
-          OUTPUT JSON ONLY:
+          OUTPUT FORMAT (JSON ONLY):
           {{
-            "files": {{"filename": "content"}},
-            "dna": "log entry string",
-            "roadmap": "roadmap changes"
+            "new_files": {{"filename": "code_content"}},
+            "update_roadmap": "Full new content for ROADMAP.md",
+            "update_dna": "Full new content for DNA.md",
+            "update_logs": "New lines to append to logs.txt"
           }}
           """
 
-          # 2. CALL OPENROUTER
-          response = requests.post(
-              url="https://openrouter.ai/api/v1/chat/completions",
-              headers={
-                  "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-                  "Content-Type": "application/json"
-              },
-              data=json.dumps({
-                  "model": "google/gemini-2.0-pro-exp-02-05:free", # Or your preferred model
-                  "messages": [{"role": "user", "content": prompt}]
-              })
-          )
+          # 3. CALL OPENROUTER
+          headers = {
+              "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+              "Content-Type": "application/json"
+          }
+          payload = {
+              "model": "google/gemini-2.0-pro-exp-02-05:free",
+              "messages": [{"role": "user", "content": prompt}]
+          }
           
-          result = response.json()['choices'][0]['message']['content']
-          # Clean JSON markdown blocks if model adds them
-          result = result.replace('```json', '').replace('```', '').strip()
-          data = json.loads(result)
+          response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+          raw_res = response.json()['choices'][0]['message']['content']
+          
+          # Clean JSON formatting
+          clean_res = raw_res.replace('```json', '').replace('```', '').strip()
+          data = json.loads(clean_res)
 
-          # 3. EXECUTE UPDATES
-          # Update Code Files
-          for filename, content in data.get('files', {}).items():
+          # 4. APPLY CHANGES (Merging & Creating)
+          # Create New Code/Scripts
+          for filename, content in data.get('new_files', {}).items():
               with open(filename, 'w') as f:
                   f.write(content)
-                  print(f"✅ Updated/Created {filename}")
+              print(f"✅ Created missing code: {filename}")
 
-          # Update DNA.md
-          timestamp = datetime.datetime.now().strftime("%Y-%m-%d")
-          dna_entry = f"\n--- \n[{timestamp}] AI Auto-Sync\n{data.get('dna')}\n"
-          with open('DNA.md', 'a') as f:
-              f.write(dna_entry)
+          # Overwrite Docs with Merged State
+          with open('ROADMAP.md', 'w') as f:
+              f.write(data['update_roadmap'])
+          
+          with open('DNA.md', 'w') as f:
+              f.write(data['update_dna'])
 
-          # Update logs.txt
           with open('logs.txt', 'a') as f:
-              f.write(f"[{timestamp}] AI Agent merged changes from steps.md\n")
+              f.write(f"\n{data['update_logs']}")
+
+          print("🚀 All files synchronized based on steps.md")
           EOF
 
-      - name: Commit and Push Changes
+      - name: Commit and Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Hoopstreet AI Bot"
           git add .
-          git commit -m "🤖 AI: Auto-sync from steps.md [skip ci]" || echo "No changes to commit"
+          git commit -m "🤖 AI: Synchronized state from steps.md [skip ci]" || echo "No changes"
           git push
