@@ -14,5 +14,29 @@
   {
     "task": "fix all errors",
     "result": "\u26a0\ufe0f OFFLINE MODE: No internet or APIs reachable. Task queued."
+  },
+  {
+    "task": "fix all error self healing",
+    "result": "\u26a0\ufe0f OFFLINE MODE: No internet or APIs reachable. Task queued."
+  },
+  {
+    "task": "cat > ~/ish-dev/system/agents/runtime.py << 'EOF'",
+    "result": "\u26a0\ufe0f OFFLINE MODE: No internet or APIs reachable. Task queued."
+  },
+  {
+    "task": "fix all error",
+    "result": "  File \"/tmp/tmpj_x1zjk9.py\", line 1\n    \u26a0\ufe0f OFFLINE MODE: No internet or APIs reachable. Task queued.\n    ^\nSyntaxError: invalid character '\u26a0' (U+26A0)\n"
+  },
+  {
+    "task": "fix all error",
+    "result": "AI returned non-code response\n"
+  },
+  {
+    "task": "import subprocess",
+    "result": "AI returned non-code response\n"
+  },
+  {
+    "task": "create ",
+    "result": "NO VALID CODE\n"
   }
 ]
