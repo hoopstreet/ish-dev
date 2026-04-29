@@ -1,0 +1,34 @@
+name: 🏀 Hoopstreet State-Aware Sync
+
+on:
+  push:
+    paths:
+      - 'steps.md'
+  workflow_dispatch:  # <--- THIS IS THE KEY FOR OPTION 7 TO WORK
+
+jobs:
+  hoopstreet-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Python Requests
+        run: pip install requests
+
+      - name: AI Logic Engine (OpenRouter)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python << 'PYEOF'
+          # (The AI processing script we wrote earlier goes here)
+          print("AI Logic Running...")
+          PYEOF
+
+      - name: Commit and Push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "Hoopstreet AI Bot"
+          git add .
+          git commit -m "🤖 AI: Synchronized state from steps.md" || echo "No changes"
+          git push
