@@ -1,16 +1,11 @@
 #!/bin/sh
 
-echo "🚀 HOOPSTREET V14 INSTALL STARTING..."
+echo "🚀 V16 CLEAN AI OS INSTALL"
 
-# folders
-mkdir -p core ai engine security daemon memory logs .github/workflows runtime
-
-# env loader
-mkdir -p /root/.hoopstreet/creds
-
-# dependencies
-apk add --no-cache python3 py3-pip git curl bash
+apk add --no-cache python3 py3-pip git bash curl
 
 pip3 install requests python-dotenv
 
-echo "✅ Base system installed"
+mkdir -p core ai memory daemon system .github/workflows
+
+echo "✔ Installed"
