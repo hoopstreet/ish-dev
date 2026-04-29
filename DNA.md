@@ -27,3 +27,21 @@ Replace Supabase with Universal Credentials Manager
 Feature - Independent credentials management
 
 ---
+
+## [v5.3.0] - 2026-04-29
+
+### 🎯 Task
+Add GitHub Actions workflow for automatic Supabase sync
+
+### 📂 Files Added
+- .github/workflows/sync-credentials.yml
+
+### ⚙️ Changes
+- Automatic sync on push to main branch
+- Manual trigger via workflow_dispatch
+- Uses GitHub Secrets for Supabase credentials
+
+### 📊 Impact
+Automation - CI/CD for credentials
+
+---
