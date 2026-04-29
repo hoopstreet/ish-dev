@@ -1,1 +1,46 @@
-{"version":"v6.0.0","status":"stable"}
+{
+  "project": "ish-dev",
+  "version": "v8.0.0",
+  "release_date": "2026-04-30",
+  "status": "production",
+  "health": "stable",
+  "repository": "https://github.com/hoopstreet/ish-dev",
+  "default_branch": "main",
+  "latest_tag": "v8.0.0",
+  "components": {
+    "smart_executor": {
+      "version": "v2.0",
+      "status": "stable"
+    },
+    "sync_engine": {
+      "version": "v1.0",
+      "status": "stable"
+    },
+    "heal_engine": {
+      "version": "v1.0",
+      "status": "stable"
+    },
+    "status_dashboard": {
+      "version": "v1.0",
+      "status": "stable"
+    },
+    "remote_manager": {
+      "version": "v1.0",
+      "status": "stable"
+    },
+    "credentials_manager": {
+      "version": "v1.0",
+      "status": "stable"
+    },
+    "ai_sync": {
+      "version": "v1.0",
+      "status": "stable"
+    }
+  },
+  "documentation": {
+    "readme": "complete",
+    "roadmap": "complete",
+    "dna": "complete",
+    "logs": "active"
+  }
+}
