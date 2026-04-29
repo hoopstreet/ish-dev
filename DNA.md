@@ -45,3 +45,30 @@ Add GitHub Actions workflow for automatic Supabase sync
 Automation - CI/CD for credentials
 
 ---
+
+## [v6.0.0] - 2026-04-29
+
+### 🎯 Task
+Complete system restructure with enhanced features
+
+### 📂 Files Changed
+- menu.sh - New 6-option menu
+- code.sh - Auto-test and auto-fix
+- sync.sh - Auto-versioning with DNA/roadmap
+- heal.sh - Self-healing for all files
+- status.sh - Combined dashboard
+- remote.sh - Projects manager
+- creds.sh - Credentials manager
+
+### ⚙️ Features
+- Code: Auto-test, auto-fix
+- Sync: Auto-version, DNA/roadmap append
+- Heal: Self-healing across all files
+- Status: Complete dashboard
+- Remote: Project clone/add/connect
+- Credentials: Universal store
+
+### 📊 Impact
+Major - Complete system overhaul
+
+---
