@@ -1,1 +1,2 @@
 [Wed Apr 29 08:40:00 UTC 2026] v5.0.0: Production release
+[Wed Apr 29 08:46:10 UTC 2026] v5.1.0: Credentials Manager added (replaced Supabase)
