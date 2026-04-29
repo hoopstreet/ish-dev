@@ -1,0 +1,103 @@
+name: 🤖 Hoopstreet AI Sync
+
+on:
+  push:
+    paths:
+      - 'steps.md' # Triggers when you update your instructions
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  ai-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run AI Agent Sync
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python << 'EOF'
+          import os, requests, json, datetime
+
+          # 1. READ STEPS & CONTEXT
+          with open('steps.md', 'r') as f:
+              steps = f.read()
+          
+          # Get file list for context
+          file_list = os.listdir('.')
+          
+          prompt = f"""
+          You are the Hoopstreet iSH Architect. 
+          Current Files: {file_list}
+          Instructions: {steps}
+          
+          TASK:
+          1. Analyze the changes in steps.md.
+          2. Generate a JSON response with:
+             - "updates": A list of files to update/create with their FULL content.
+             - "dna_entry": A short summary for DNA.md (v8.0.x style).
+             - "roadmap_status": Any updates for the ROADMAP.md phases.
+          3. If a file mentioned in steps is missing, CREATE the code for it.
+          
+          OUTPUT JSON ONLY:
+          {{
+            "files": {{"filename": "content"}},
+            "dna": "log entry string",
+            "roadmap": "roadmap changes"
+          }}
+          """
+
+          # 2. CALL OPENROUTER
+          response = requests.post(
+              url="https://openrouter.ai/api/v1/chat/completions",
+              headers={
+                  "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                  "Content-Type": "application/json"
+              },
+              data=json.dumps({
+                  "model": "google/gemini-2.0-pro-exp-02-05:free", # Or your preferred model
+                  "messages": [{"role": "user", "content": prompt}]
+              })
+          )
+          
+          result = response.json()['choices'][0]['message']['content']
+          # Clean JSON markdown blocks if model adds them
+          result = result.replace('```json', '').replace('```', '').strip()
+          data = json.loads(result)
+
+          # 3. EXECUTE UPDATES
+          # Update Code Files
+          for filename, content in data.get('files', {}).items():
+              with open(filename, 'w') as f:
+                  f.write(content)
+                  print(f"✅ Updated/Created {filename}")
+
+          # Update DNA.md
+          timestamp = datetime.datetime.now().strftime("%Y-%m-%d")
+          dna_entry = f"\n--- \n[{timestamp}] AI Auto-Sync\n{data.get('dna')}\n"
+          with open('DNA.md', 'a') as f:
+              f.write(dna_entry)
+
+          # Update logs.txt
+          with open('logs.txt', 'a') as f:
+              f.write(f"[{timestamp}] AI Agent merged changes from steps.md\n")
+          EOF
+
+      - name: Commit and Push Changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "Hoopstreet AI Bot"
+          git add .
+          git commit -m "🤖 AI: Auto-sync from steps.md [skip ci]" || echo "No changes to commit"
+          git push
