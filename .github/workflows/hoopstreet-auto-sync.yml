@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'steps.md'
-  workflow_dispatch:  # <--- THIS IS THE KEY FOR OPTION 7 TO WORK
+  workflow_dispatch:
 
 jobs:
   hoopstreet-sync:
@@ -12,23 +12,48 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Install Python Requests
-        run: pip install requests
+        with:
+          fetch-depth: 0
 
       - name: AI Logic Engine (OpenRouter)
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          python << 'PYEOF'
-          # (The AI processing script we wrote earlier goes here)
-          print("AI Logic Running...")
-          PYEOF
+          python3 -c '
+          import os, requests, json
+
+          def read_f(p): return open(p,"r").read() if os.path.exists(p) else ""
+
+          # 1. Gather Context
+          steps_md = read_f("steps.md")
+          dna_md = read_f("DNA.md")
+          
+          prompt = f"Context: {dna_md}\n\nTask from steps.md: {steps_md}\n\nAnalyze steps.md. If it mentions code, generate the full valid Python/Bash file. Return JSON: {{\"files\": {{\"path\": \"content\"}}, \"dna\": \"log message\"}}"
+
+          # 2. Call OpenRouter
+          res = requests.post(
+              "https://openrouter.ai/api/v1/chat/completions",
+              headers={"Authorization": f"Bearer {os.environ[\"OPENROUTER_API_KEY\"]}"},
+              json={
+                  "model": "google/gemini-2.0-flash-001",
+                  "messages": [{"role": "user", "content": prompt}]
+              }
+          ).json()
+          
+          data = json.loads(res["choices"][0]["message"]["content"].replace("```json","").replace("```",""))
+
+          # 3. Write Changes
+          for path, content in data.get("files", {}).items():
+              os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+              with open(path, "w") as f: f.write(content)
+          
+          with open("DNA.md", "a") as f: f.write(f"\n- {data.get(\"dna\")}")
+          '
 
       - name: Commit and Push
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "Hoopstreet AI Bot"
           git add .
-          git commit -m "🤖 AI: Synchronized state from steps.md" || echo "No changes"
+          git commit -m "🤖 AI: Auto-heal & sync from steps.md" || echo "No changes"
           git push
