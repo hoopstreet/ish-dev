@@ -1,31 +1,19 @@
-import requests
-from security.loader import secrets
+import os
+from dotenv import load_dotenv
 
-print(f"Checking Gemini Keys: {len(secrets.gemini)} found")
-print(f"Checking OpenRouter Keys: {len(secrets.openrouter)} found")
+# Load the specific path we created
+load_dotenv("/root/.hoopstreet/creds/.env")
 
-# Test Gemini First Key
-k = secrets.gemini[0]
-try:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={k}"
-    r = requests.post(url, json={"contents":[{"parts":[{"text":"hi"}]}]}, timeout=10)
-    print(f"Gemini Status: {r.status_code}")
-    if r.status_code != 200:
-        print(f"Gemini Error: {r.text}")
-except Exception as e:
-    print(f"Gemini Connection Failed: {e}")
+gemini_keys = [k for k in os.getenv("GEMINI_KEYS", "").split(",") if k]
+open_keys = [k for k in os.getenv("OPENROUTER_KEYS", "").split(",") if k]
 
-# Test OpenRouter First Key
-k2 = secrets.openrouter[0]
-try:
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {k2}"},
-        json={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
-        timeout=10
-    )
-    print(f"OpenRouter Status: {r.status_code}")
-    if r.status_code != 200:
-        print(f"OpenRouter Error: {r.text}")
-except Exception as e:
-    print(f"OpenRouter Connection Failed: {e}")
+print(f"Checking Gemini Keys: {len(gemini_keys)} found")
+print(f"Checking OpenRouter Keys: {len(open_keys)} found")
+
+if gemini_keys:
+    from ai.router import ai
+    print("Testing Gemini Connection...")
+    res = ai.ask("Status check: Reply with 'Hoopstreet Online'")
+    print(f"Response: {res}")
+else:
+    print("Skipping test: No keys available.")
