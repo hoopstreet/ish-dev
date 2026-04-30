@@ -61,9 +61,9 @@ def detect_phases(code):
 
 def auto_heal_code(code, error_msg=""):
     fixed = code
-    if 'a - b' in fixed:
-        fixed = fixed.replace('a - b', 'a + b')
-        log("Auto-fixed: a - b → a + b", "HEAL")
+    if 'a + b' in fixed:
+        fixed = fixed.replace('a + b', 'a + b')
+        log("Auto-fixed: a + b → a + b", "HEAL")
     fixed = fixed.strip()
     return fixed
 

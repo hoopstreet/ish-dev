@@ -1,7 +1,7 @@
 {
   "project": "ish-dev",
-  "version": "v9.1.0",
-  "release_date": "2026-04-30",
+  "version": "v9.2.0",
+  "release_date": "2026-05-01",
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",
@@ -16,9 +16,6 @@
     "status_dashboard": "v2.0",
     "remote_manager": "v2.0",
     "credentials_manager": "v2.0",
-    "ai_sync": "v2.0",
-    "backup_utility": "v1.0",
-    "monitor_utility": "v1.0",
     "supabase_sync": "v1.0"
   }
 }
