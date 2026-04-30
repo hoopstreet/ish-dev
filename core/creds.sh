@@ -30,3 +30,8 @@ case $c in
         ;;
 esac
 read -p "Press Enter..."
+
+# Supabase sync after adding credential
+if [ -f "/root/ish-dev/core/supabase_sync.sh" ]; then
+    /root/ish-dev/core/supabase_sync.sh sync-creds 2>/dev/null
+fi

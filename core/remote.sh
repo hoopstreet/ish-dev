@@ -32,3 +32,8 @@ case $r in
         ;;
 esac
 read -p "Press Enter..."
+
+# Sync to Supabase after adding project
+if [ -f "/root/ish-dev/core/supabase_sync.sh" ]; then
+    /root/ish-dev/core/supabase_sync.sh sync-projects 2>/dev/null
+fi

@@ -18,10 +18,11 @@ while true; do
     echo "  7. 🤖 AI Sync     - Trigger GitHub Actions"
     echo "  8. 💾 Backup      - Backup/Restore system"
     echo "  9. 📊 Monitor     - System health check"
+  S. 🗄️ Supabase - Cloud sync & backup
     echo "  0. 🚪 Exit        - Exit to shell"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    printf "👉 Choose (0-9): "
+    printf "👉 Choose (0-9, S, SC, PC): "
     read choice
 
     case $choice in
@@ -34,6 +35,9 @@ while true; do
         7) /root/ish-dev/core/ai_sync.sh ;;
         8) /root/ish-dev/core/backup.sh ;;
         9) /root/ish-dev/core/monitor.sh ;;
+        S|s) /root/ish-dev/core/supabase_sync.sh status ;;
+        SC|sc) /root/ish-dev/core/supabase_sync.sh sync-all ;;
+        PC|pc) /root/ish-dev/core/supabase_sync.sh pull-all ;;
         0) echo "Goodbye!"; exit 0 ;;
         *) echo "Invalid. Enter 0-9"; sleep 1 ;;
     esac

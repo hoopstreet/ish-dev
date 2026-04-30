@@ -496,3 +496,25 @@ Complete repository reorganization and cleanup
 Major - Clean, organized structure
 
 ---
+
+## [v9.1.0] - 2026-04-30
+
+### 🎯 Task
+Integrate Supabase as central database for credentials and projects
+
+### 📂 Files Added
+- config/supabase.env - Supabase configuration
+- config/supabase_schema.sql - Database schema
+- core/supabase_sync.sh - Sync utility
+
+### ⚙️ Features
+- Credentials auto-sync to Supabase
+- Projects auto-sync to Supabase
+- Activity logging to Supabase
+- System state persistence
+- Cross-device synchronization
+
+### 📊 Impact
+Major - Cloud integration
+
+---

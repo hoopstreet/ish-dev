@@ -1,19 +1,13 @@
 {
   "project": "ish-dev",
-  "version": "v9.0.0",
+  "version": "v9.1.0",
   "release_date": "2026-04-30",
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",
-  "default_branch": "main",
-  "latest_tag": "v9.0.0",
-  "structure": {
-    "core": "11 active scripts",
-    "agents": "6 recovered modules",
-    "utils": "2 utilities",
-    "docs": "6 documentation files",
-    "backups": "2 config backups",
-    "archive": "old files organized"
+  "supabase": {
+    "integrated": true,
+    "tables": ["credentials", "projects", "system_state", "dna_logs", "activity_logs"]
   },
   "components": {
     "code_executor": "v3.0",
@@ -24,6 +18,7 @@
     "credentials_manager": "v2.0",
     "ai_sync": "v2.0",
     "backup_utility": "v1.0",
-    "monitor_utility": "v1.0"
+    "monitor_utility": "v1.0",
+    "supabase_sync": "v1.0"
   }
 }
