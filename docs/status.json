@@ -5,11 +5,14 @@
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",
-  "mobile_optimized": true,
+  "heal_engine": {
+    "status": "working",
+    "fixes": ["a - b bug", "missing shebang", "execute permissions"]
+  },
   "components": {
     "code_executor": "v3.0",
     "sync_engine": "v2.0",
-    "heal_engine": "v2.0",
+    "heal_engine": "v3.0",
     "status_dashboard": "v3.0",
     "remote_manager": "v2.0",
     "credentials_manager": "v2.0",
