@@ -8,8 +8,9 @@ PROJECTS_FILE="/root/ish-dev/projects.json"
 # Load Supabase config
 if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
+    echo "✅ Loaded Supabase config"
 else
-    echo "❌ Supabase not configured. Run: supabase-setup"
+    echo "❌ Supabase not configured. Run: /root/ish-dev/core/supabase_sync.sh setup"
     exit 1
 fi
 
@@ -35,6 +36,7 @@ sync_credentials() {
     
     echo "✅ Credentials sync complete"
 }
+
 # Pull credentials from Supabase
 pull_credentials() {
     echo "🔄 Pulling credentials from Supabase..."
@@ -63,18 +65,18 @@ sync_projects() {
     echo "🔄 Syncing projects to Supabase..."
     
     if [ ! -f "$PROJECTS_FILE" ]; then
-        echo "  No local projects found"
-        return
+        echo '{"projects":[]}' > "$PROJECTS_FILE"
     fi
     
     python3 -c "
 import json, urllib.request
 with open('$PROJECTS_FILE') as f:
-    projects = json.load(f).get('projects', [])
+    data = json.load(f)
+    projects = data.get('projects', [])
 url = '$SUPABASE_URL'
 key = '$SUPABASE_ANON_KEY'
 for p in projects:
-    payload = json.dumps({'name': p.get('name'), 'repo_url': p.get('repo'), 'local_path': p.get('local')}).encode()
+    payload = json.dumps({'name': p.get('name'), 'repo_url': p.get('repo', p.get('repo_url')), 'local_path': p.get('local')}).encode()
     req = urllib.request.Request(f'{url}/rest/v1/projects', data=payload, method='POST')
     req.add_header('apikey', key)
     req.add_header('Authorization', f'Bearer {key}')
@@ -82,8 +84,8 @@ for p in projects:
     try:
         urllib.request.urlopen(req, timeout=5)
         print(f'  Synced: {p.get(\"name\")}')
-    except:
-        pass
+    except Exception as e:
+        print(f'  Failed: {p.get(\"name\")}')
 "
     echo "✅ Projects sync complete"
 }
@@ -105,41 +107,7 @@ with open('$PROJECTS_FILE', 'w') as f:
     json.dump({'projects': projects}, f, indent=2)
 print(f'✅ Pulled {len(projects)} projects')
 "
-    
     echo "✅ Projects pulled from Supabase"
-}
-
-# Log activity to Supabase
-log_activity() {
-    local event="$1"
-    local level="${2:-INFO}"
-    
-    curl -s -X POST "${SUPABASE_URL}/rest/v1/activity_logs" \
-        -H "apikey: $SUPABASE_ANON_KEY" \
-        -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-        -H "Content-Type: application/json" \
-        -d "{\"event\":\"$event\",\"level\":\"$level\",\"details\":{\"source\":\"iSH\",\"timestamp\":\"$(date -Iseconds)\"}}" 2>/dev/null
-}
-
-
-# Get system state
-get_system_state() {
-    curl -s "${SUPABASE_URL}/rest/v1/system_state?select=key,value" \
-        -H "apikey: $SUPABASE_ANON_KEY" \
-        -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-        2>/dev/null | python3 -m json.tool
-}
-
-# Update system state
-update_system_state() {
-    local key="$1"
-    local value="$2"
-    
-    curl -s -X PATCH "${SUPABASE_URL}/rest/v1/system_state?key=eq.${key}" \
-        -H "apikey: $SUPABASE_ANON_KEY" \
-        -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-        -H "Content-Type: application/json" \
-        -d "{\"value\":\"$value\",\"updated_at\":\"$(date -Iseconds)\"}" 2>/dev/null
 }
 
 # Show status
@@ -148,16 +116,9 @@ show_status() {
     echo "═══════════════════════════════════════════════════════"
     echo "  🗄️ SUPABASE STATUS"
     echo "═══════════════════════════════════════════════════════"
-    echo "  URL: $SUPABASE_URL"
+    echo "  URL: ${SUPABASE_URL}"
     echo ""
-    echo "  Tables:"
-    echo "    • credentials - Token storage"
-    echo "    • projects - GitHub projects"
-    echo "    • system_state - Agent state"
-    echo "    • dna_logs - Evolution tracking"
-    echo "    • activity_logs - Activity log"
-    echo ""
-    get_system_state
+    echo "  Tables: credentials, projects, system_state, dna_logs, activity_logs"
     echo ""
 }
 
@@ -168,7 +129,7 @@ setup_supabase() {
     echo "  🗄️ SUPABASE SETUP"
     echo "═══════════════════════════════════════════════════════"
     echo ""
-    printf "Enter Supabase URL (e.g., https://xxxxx.supabase.co): "
+    printf "Enter Supabase URL: "
     read url
     printf "Enter Supabase Anon Key: "
     read key
@@ -180,12 +141,6 @@ EOF
     
     echo ""
     echo "✅ Supabase configured!"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Run the SQL schema in Supabase SQL Editor"
-    echo "  2. Test connection: supabase_sync.sh status"
-    echo "  3. Sync credentials: supabase_sync.sh sync-creds"
-    echo "  4. Sync projects: supabase_sync.sh sync-projects"
 }
 
 case "$1" in
@@ -197,7 +152,6 @@ case "$1" in
     sync-all) sync_credentials; sync_projects ;;
     pull-all) pull_credentials; pull_projects ;;
     status) show_status ;;
-    log) log_activity "$2" "$3" ;;
     *) 
         echo ""
         echo "═══════════════════════════════════════════════════════"
@@ -213,7 +167,6 @@ case "$1" in
         echo "  sync-all       - Sync everything"
         echo "  pull-all       - Pull everything"
         echo "  status         - Show Supabase status"
-        echo "  log <event>    - Log activity to Supabase"
         echo ""
         ;;
 esac

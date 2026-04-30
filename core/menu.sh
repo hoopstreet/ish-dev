@@ -18,7 +18,7 @@ while true; do
     echo "  7. 🤖 AI Sync     - Trigger GitHub Actions"
     echo "  8. 💾 Backup      - Backup/Restore system"
     echo "  9. 📊 Monitor     - System health check"
-  S. 🗄️ Supabase - Cloud sync & backup
+  S. 🗄️ Supabase - Real-time cloud sync (auto on push)
     echo "  0. 🚪 Exit        - Exit to shell"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
