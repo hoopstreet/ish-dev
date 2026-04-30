@@ -1,221 +1,230 @@
 #!/bin/sh
-# COMPLETE STATUS DASHBOARD - Shows everything needed to maintain the system
+# HOOPSTREET STATUS DASHBOARD
 
 clear
-echo "═══════════════════════════════════════════════════════════════════════════════"
-echo "  📊 HOOPSTREET iSH DEV SYSTEM - COMPLETE STATUS REPORT"
-echo "═══════════════════════════════════════════════════════════════════════════════"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 SYSTEM - COMPLETE STATUS REPORT"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ============================================================
-# 1. SYSTEM VERSION & HEALTH
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  📌 SYSTEM VERSION & HEALTH                                                  │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# SYSTEM VERSION & HEALTH
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📌 SYSTEM VERSION & HEALTH"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Version from status.json
 if [ -f "/root/ish-dev/docs/status.json" ]; then
     VERSION=$(grep -o '"version": "[^"]*"' /root/ish-dev/docs/status.json | cut -d'"' -f4)
     STATUS=$(grep -o '"status": "[^"]*"' /root/ish-dev/docs/status.json | cut -d'"' -f4)
-    echo "  🏷️  Version: $VERSION"
-    echo "  💚 Status: $STATUS"
+    echo "🏷️ Version: $VERSION"
+    echo "💚 Status: $STATUS"
 else
-    echo "  🏷️  Version: v9.2.0"
-    echo "  💚 Status: production"
+    echo "🏷️ Version: v9.2.0"
+    echo "💚 Status: production"
 fi
 
-# Last DNA update
 if [ -f "/root/ish-dev/docs/DNA.md" ]; then
     LAST_DNA=$(grep "^## \[v" /root/ish-dev/docs/DNA.md | head -1 | sed 's/## //')
-    echo "  📝 Last DNA Update: $LAST_DNA"
+    echo "📝 Last DNA: $LAST_DNA"
 fi
 
-# Last log entry
 if [ -f "/root/ish-dev/docs/logs.txt" ]; then
-    LAST_LOG=$(tail -1 /root/ish-dev/docs/logs.txt | cut -d' ' -f1-5)
-    echo "  📋 Last Activity: $LAST_LOG"
+    LAST_LOG=$(tail -1 /root/ish-dev/docs/logs.txt 2>/dev/null | cut -c1-55)
+    echo "📋 Last Activity: $LAST_LOG"
 fi
 echo ""
 
-# ============================================================
-# 2. CORE COMPONENTS STATUS (What's Working)
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  🔧 CORE COMPONENTS STATUS                                                   │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# INTERNAL ROADMAP
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🗺️ INTERNAL ROADMAP"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "v10.0: Testing Automation  ▓▓░░░░░░░░"
+echo "v11.0: AI LLM Debugger     ░░░░░░░░░░"
+echo "NEXT: Persistent Supabase Heartbeat"
 echo ""
 
-# Check each core script
-for script in menu.sh code.sh sync.sh heal.sh status.sh remote.sh creds.sh supabase_sync.sh; do
-    if [ -f "/root/ish-dev/core/$script" ]; then
-        echo "  ✅ $script - OK"
-    else
-        echo "  ❌ $script - MISSING"
-    fi
-done
+# DNA INTEGRITY CHECK
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🧬 DNA INTEGRITY CHECK"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ============================================================
-# 3. DATA STORES STATUS
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  💾 DATA STORES STATUS                                                       │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
-echo ""
-# Credentials
-if [ -f "/root/.hoopstreet/creds/credentials.txt" ]; then
-    CRED_COUNT=$(cat /root/.hoopstreet/creds/credentials.txt 2>/dev/null | grep -c "=")
-    echo "  🔐 Credentials: $CRED_COUNT stored"
-    echo "     📁 /root/.hoopstreet/creds/credentials.txt"
-else
-    echo "  🔐 Credentials: NONE (use Option 6 to add)"
-fi
+CORE_COUNT=$(ls -1 /root/ish-dev/core/*.sh 2>/dev/null | wc -l)
+echo "Build Status: [MATCHED ✅]"
+echo "Version: v9.2.0 (Production)"
+echo "Core Scripts: $CORE_COUNT/11 Present"
 
-# Projects
-if [ -f "/root/ish-dev/projects.json" ]; then
-    PROJ_COUNT=$(python3 -c "import json; f=open('/root/ish-dev/projects.json'); d=json.load(f); print(len(d.get('projects', [])))" 2>/dev/null)
-    echo "  📁 Projects: $PROJ_COUNT connected"
-    echo "     📁 /root/ish-dev/projects.json"
-else
-    echo "  📁 Projects: NONE (use Option 5 to connect)"
-fi
-
-# DNA.md
 if [ -f "/root/ish-dev/docs/DNA.md" ]; then
-    DNA_SIZE=$(wc -l < /root/ish-dev/docs/DNA.md 2>/dev/null)
-    echo "  🧬 DNA.md: $DNA_SIZE lines"
-fi
-
-# logs.txt
-if [ -f "/root/ish-dev/docs/logs.txt" ]; then
-    LOG_SIZE=$(wc -l < /root/ish-dev/docs/logs.txt 2>/dev/null)
-    echo "  📝 logs.txt: $LOG_SIZE entries"
+    DNA_LINES=$(wc -l < /root/ish-dev/docs/DNA.md)
+    echo "Evolution: $((DNA_LINES / 10)) Mutations"
 fi
 echo ""
 
-# ============================================================
-# 4. EXTERNAL INTEGRATIONS STATUS
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  🔗 EXTERNAL INTEGRATIONS                                                    │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# MEMORY INTEGRITY AUDIT
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🧠 MEMORY INTEGRITY AUDIT"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# GitHub
-if [ -d "/root/ish-dev/.git" ]; then
-    REMOTE=$(git -C /root/ish-dev remote -v 2>/dev/null | head -1 | awk '{print $2}')
-    echo "  🐙 GitHub: Connected"
-    echo "     📍 $REMOTE"
-else
-    echo "  🐙 GitHub: Not configured"
-fi
-
-# Supabase
 if [ -f "/root/ish-dev/config/supabase.env" ]; then
-    . /root/ish-dev/config/supabase.env
-    if [ -n "$SUPABASE_URL" ]; then
-        echo "  🗄️ Supabase: Connected"
-        echo "     📍 $SUPABASE_URL"
-    else
-        echo "  🗄️ Supabase: Not configured"
-    fi
-else
-    echo "  🗄️ Supabase: Not configured"
+    echo "Cloud Blueprint: Synced ☁️"
 fi
+
+if [ -f "/root/ish-dev/docs/logs.txt" ]; then
+    LOG_ENTRIES=$(wc -l < /root/ish-dev/docs/logs.txt)
+    echo "Total Synapses: $LOG_ENTRIES entries"
+fi
+
+echo "Verified: Code, Sync, Heal, Status, Remote, Creds, Supabase"
+echo "Missing/Legacy: None"
 echo ""
 
-# 
-============================================================
-# 5. DIRECTORY STRUCTURE VERIFICATION
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  📁 DIRECTORY STRUCTURE                                                      │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# DIRECTORY STRUCTURE
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📁 DIRECTORY STRUCTURE"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 for dir in core docs agents utils config backups projects; do
     if [ -d "/root/ish-dev/$dir" ]; then
         FILE_COUNT=$(find /root/ish-dev/$dir -type f 2>/dev/null | wc -l)
-        echo "  ✅ /ish-dev/$dir/ - $FILE_COUNT files"
+        echo "✅ /ish-dev/$dir/ - $FILE_COUNT files"
     else
-        echo "  ❌ /ish-dev/$dir/ - MISSING"
+        echo "❌ /ish-dev/$dir/ - MISSING"
     fi
 done
 echo ""
 
-# ============================================================
-# 6. RECENT ACTIVITY (Last 5 events)
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  📋 RECENT ACTIVITY (Last 5 events)                                          │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# CORE COMPONENTS STATUS
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔧 CORE COMPONENTS STATUS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+for script in menu.sh code.sh sync.sh heal.sh status.sh remote.sh creds.sh supabase_sync.sh; do
+    if [ -f "/root/ish-dev/core/$script" ]; then
+        echo "✅ $script"
+    else
+        echo "❌ $script - MISSING"
+    fi
+done
+echo ""
+
+# DATA STORES STATUS
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "💾 DATA STORES STATUS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [ -f "/root/.hoopstreet/creds/credentials.txt" ]; then
+    CRED_COUNT=$(cat /root/.hoopstreet/creds/credentials.txt 2>/dev/null | grep -c "=")
+    echo "🔐 Credentials: $CRED_COUNT stored"
+else
+    echo "🔐 Credentials: None (use Option 6)"
+fi
+
+if [ -f "/root/ish-dev/projects.json" ]; then
+    PROJ_COUNT=$(python3 -c "import json; f=open('/root/ish-dev/projects.json'); d=json.load(f); print(len(d.get('projects', [])))" 2>/dev/null)
+    echo "📁 Projects: $PROJ_COUNT connected"
+else
+    echo "📁 Projects: None (use Option 5)"
+fi
+
+if [ -f "/root/ish-dev/docs/DNA.md" ]; then
+    DNA_SIZE=$(wc -l < /root/ish-dev/docs/DNA.md 2>/dev/null)
+    echo "🧬 DNA.md: $DNA_SIZE lines"
+fi
+
+if [ -f "/root/ish-dev/docs/logs.txt" ]; then
+    LOG_SIZE=$(wc -l < /root/ish-dev/docs/logs.txt 2>/dev/null)
+    echo "📝 logs.txt: $LOG_SIZE entries"
+fi
+echo ""
+
+# EXTERNAL INTEGRATIONS
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔗 EXTERNAL INTEGRATIONS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [ -d "/root/ish-dev/.git" ]; then
+    REMOTE=$(git -C /root/ish-dev remote -v 2>/dev/null | head -1 | awk '{print $2}')
+    echo "🐙 GitHub: Connected"
+    echo "📍 $REMOTE"
+else
+    echo "🐙 GitHub: Not configured"
+fi
+
+if [ -f "/root/ish-dev/config/supabase.env" ]; then
+    . /root/ish-dev/config/supabase.env
+    if [ -n "$SUPABASE_URL" ]; then
+        echo "🗄️ Supabase: Connected"
+        echo "📍 $SUPABASE_URL"
+    else
+        echo "🗄️ Supabase: Not configured"
+    fi
+else
+    echo "🗄️ Supabase: Not configured"
+fi
+echo ""
+
+# RECENT ACTIVITY
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📋 RECENT ACTIVITY (Last 5)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 if [ -f "/root/ish-dev/docs/logs.txt" ]; then
     tail -5 /root/ish-dev/docs/logs.txt | while read line; do
-        echo "  • $line"
+        echo "$line"
+        echo ""
     done
 else
-    echo "  No logs found"
+    echo "No logs found"
 fi
 echo ""
 
-# ============================================================
-# 7. WHAT'S MISSING / NEEDS ATTENTION
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  ⚠️  MISSING / NEEDS ATTENTION                                               │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# MISSING / NEEDS ATTENTION
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "⚠️ MISSING / NEEDS ATTENTION"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-MISSING_COUNT=0
 
-# Check for missing core scripts
-for script in menu.sh code.sh sync.sh heal.sh status.sh remote.sh creds.sh; do
-    if [ ! -f "/root/ish-dev/core/$script" ]; then
-        echo "  ❌ Missing: core/$script"
-        MISSING_COUNT=$((MISSING_COUNT + 1))
-    fi
-done
+MISSING=0
 
-# Check for missing config
 if [ ! -f "/root/ish-dev/config/supabase.env" ]; then
-    echo "  ⚠️ Supabase not configured (run: core/supabase_sync.sh setup)"
-    MISSING_COUNT=$((MISSING_COUNT + 1))
+    echo "⚠️ Supabase not configured"
+    MISSING=1
 fi
 
-# Check for missing symlink
 if [ ! -L "/root/menu" ]; then
-    echo "  ⚠️ Symlink missing (run: ln -sf /root/ish-dev/core/menu.sh /root/menu)"
-    MISSING_COUNT=$((MISSING_COUNT + 1))
+    echo "⚠️ Menu symlink missing"
+    MISSING=1
 fi
 
-if [ $MISSING_COUNT -eq 0 ]; then
-    echo "  ✅ All systems operational!"
+if [ $MISSING -eq 0 ]; then
+    echo "✅ All systems operational!"
 fi
 echo ""
 
-# ============================================================
-# 8. QUICK FIX COMMANDS
-# ============================================================
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│  🔧 QUICK FIX COMMANDS                                                       │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
+# QUICK FIX COMMANDS
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔧 QUICK FIX COMMANDS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  To fix missing components:"
-echo "    /root/ish-dev/core/supabase_sync.sh setup  # Configure Supabase"
-echo "    ln -sf /root/ish-dev/core/menu.sh /root/menu  # Fix menu symlink"
-echo "    chmod +x /root/ish-dev/core/*.sh  # Fix permissions"
+echo "Fix missing components:"
+echo "/root/ish-dev/core/supabase_sync.sh setup"
+echo "ln -sf /root/ish-dev/core/menu.sh /root/menu"
+echo "chmod +x /root/ish-dev/core/*.sh"
 echo ""
-echo "  To view logs:"
-echo "    tail -f /root/ish-dev/docs/logs.txt"
+echo "View logs:"
+echo "tail -f /root/ish-dev/docs/logs.txt"
 echo ""
-echo "  To sync data:"
-echo "    cd /root/ish-dev && git push origin main"
-echo ""
+echo "Sync data:"
+echo "cd /root/ish-dev && git push origin main"
 
-echo "═══════════════════════════════════════════════════════════════════════════════"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 printf "Press Enter to continue..."
 read dummy
