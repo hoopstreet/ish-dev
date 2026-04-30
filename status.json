@@ -1,12 +1,12 @@
 {
   "project": "ish-dev",
-  "version": "v8.2.0",
+  "version": "v8.2.1",
   "release_date": "2026-04-30",
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",
   "default_branch": "main",
-  "latest_tag": "v8.2.0",
+  "latest_tag": "v8.2.1",
   "components": {
     "code_executor": "v3.0",
     "sync_engine": "v2.0",
