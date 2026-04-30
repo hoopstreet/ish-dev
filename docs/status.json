@@ -1,12 +1,20 @@
 {
   "project": "ish-dev",
-  "version": "v8.3.0",
+  "version": "v9.0.0",
   "release_date": "2026-04-30",
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",
   "default_branch": "main",
-  "latest_tag": "v8.3.0",
+  "latest_tag": "v9.0.0",
+  "structure": {
+    "core": "11 active scripts",
+    "agents": "6 recovered modules",
+    "utils": "2 utilities",
+    "docs": "6 documentation files",
+    "backups": "2 config backups",
+    "archive": "old files organized"
+  },
   "components": {
     "code_executor": "v3.0",
     "sync_engine": "v2.0",
@@ -14,6 +22,8 @@
     "status_dashboard": "v2.0",
     "remote_manager": "v2.0",
     "credentials_manager": "v2.0",
-    "ai_sync": "v2.0"
+    "ai_sync": "v2.0",
+    "backup_utility": "v1.0",
+    "monitor_utility": "v1.0"
   }
 }
