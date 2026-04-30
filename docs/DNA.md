@@ -584,3 +584,22 @@ Finalize Heal Engine and complete system
 Stable - Production ready
 
 ---
+
+## [v9.3.1] - 2026-04-30
+
+### 🎯 Task
+Auto-sync from Hoopstreet iSH device
+
+### 📂 Files Synced
+- core/sync.sh
+
+### ⚙️ Changes
+Automated sync via iSH agent
+
+### 🧪 Testing
+**Result:** PASS
+
+### 📊 Impact
+Sync / Update
+
+---
