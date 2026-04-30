@@ -3,6 +3,10 @@
     {
       "name": "Teleset",
       "repo_url": "https://github.com/hoopstreet/Teleset"
+    },
+    {
+      "name": "ish-dev",
+      "repo_url": "https://github.com/hoopstreet/ish-dev"
     }
   ]
 }
