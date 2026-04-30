@@ -1,8 +1,3 @@
-# ============================================================
-# HOOPSTREET SUPABASE AUTO-SYNC WORKFLOW
-# Syncs credentials.json and projects.json to Supabase
-# ============================================================
-
 name: Sync to Supabase
 
 on:
@@ -11,23 +6,14 @@ on:
     paths:
       - 'credentials.json'
       - 'projects.json'
-      - 'core/*.sh'
-      - 'docs/*.md'
-  workflow_dispatch:  # Manual trigger
+      - 'docs/DNA.md'
+  workflow_dispatch:
 
 jobs:
-  sync-credentials:
+  sync:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: actions/checkout@v4
       
       - name: Sync Credentials to Supabase
         env:
@@ -39,30 +25,21 @@ jobs:
             import json, urllib.request, os
             url = os.environ.get('SUPABASE_URL')
             key = os.environ.get('SUPABASE_KEY')
-            
             with open('credentials.json') as f:
                 creds = json.load(f).get('credentials', {})
-            
             for name, cred in creds.items():
-                payload = json.dumps({
-                    'name': name,
-                    'value': cred.get('value', ''),
-                    'notes': cred.get('notes', '')
-                }).encode()
-                
+                payload = json.dumps({'name': name, 'value': cred.get('value', '')}).encode()
                 req = urllib.request.Request(f'{url}/rest/v1/credentials', data=payload, method='POST')
                 req.add_header('apikey', key)
                 req.add_header('Authorization', f'Bearer {key}')
                 req.add_header('Content-Type', 'application/json')
-                
                 try:
                     urllib.request.urlopen(req, timeout=10)
-                    print(f'✅ Synced: {name}')
+                    print(f'Synced: {name}')
                 except Exception as e:
-                    print(f'❌ Failed: {name} - {e}')
+                    print(f'Failed: {name}')
             PYEOF
-          else:
-            echo "⚠️ No credentials.json found"
+          fi
       
       - name: Sync Projects to Supabase
         env:
@@ -74,74 +51,19 @@ jobs:
             import json, urllib.request, os
             url = os.environ.get('SUPABASE_URL')
             key = os.environ.get('SUPABASE_KEY')
-            
             with open('projects.json') as f:
                 data = json.load(f)
                 projects = data.get('projects', [])
-            
             for p in projects:
-                payload = json.dumps({
-                    'name': p.get('name'),
-                    'repo_url': p.get('repo', p.get('repo_url')),
-                    'local_path': p.get('local', '')
-                }).encode()
-                
+                payload = json.dumps({'name': p.get('name'), 'repo_url': p.get('repo_url')}).encode()
                 req = urllib.request.Request(f'{url}/rest/v1/projects', data=payload, method='POST')
                 req.add_header('apikey', key)
                 req.add_header('Authorization', f'Bearer {key}')
                 req.add_header('Content-Type', 'application/json')
-                
                 try:
                     urllib.request.urlopen(req, timeout=10)
-                    print(f'✅ Synced project: {p.get("name")}')
+                    print(f'Synced project: {p.get("name")}')
                 except Exception as e:
-                    print(f'❌ Failed: {p.get("name")} - {e}')
+                    print(f'Failed: {p.get("name")}')
             PYEOF
-          else:
-            echo "⚠️ No projects.json found"
-
-  sync-logs:
-    runs-on: ubuntu-latest
-    needs: sync-credentials
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Sync DNA.md to Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          if [ -f "docs/DNA.md" ]; then
-            python3 << PYEOF
-            import json, urllib.request, os, re
-            url = os.environ.get('SUPABASE_URL')
-            key = os.environ.get('SUPABASE_KEY')
-            
-            with open('docs/DNA.md') as f:
-                content = f.read()
-            
-            # Extract version
-            version_match = re.search(r'\[v[\d\.]+\]', content)
-            version = version_match.group(0) if version_match else 'unknown'
-            
-            payload = json.dumps({
-                'version': version,
-                'content': content[:5000],
-                'source': 'github-actions'
-            }).encode()
-            
-            req = urllib.request.Request(f'{url}/rest/v1/dna_logs', data=payload, method='POST')
-            req.add_header('apikey', key)
-            req.add_header('Authorization', f'Bearer {key}')
-            req.add_header('Content-Type', 'application/json')
-            
-            try:
-                urllib.request.urlopen(req, timeout=10)
-                print('✅ DNA.md synced')
-            except Exception as e:
-                print(f'❌ Failed: {e}')
-            PYEOF
-          else:
-            echo "⚠️ No DNA.md found"
+          fi
