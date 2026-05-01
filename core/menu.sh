@@ -18,7 +18,11 @@ while true; do
     read choice
 
     case "$choice" in
-        1) /root/ish-dev/core/code.sh ;;
+        1) 
+            echo "Launching Code Executor..."
+            sleep 1
+            /root/ish-dev/core/code.sh
+            ;;
         2) /root/ish-dev/core/sync.sh ;;
         3) /root/ish-dev/core/heal.sh ;;
         4) /root/ish-dev/core/status.sh ;;
