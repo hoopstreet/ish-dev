@@ -1,21 +1,32 @@
-name: Hoopstreet 24/7 Autonomous Engine
+name: 24/7 Hoopstreet Autonomous Agent
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  push:
-    branches: [ main ]
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allows manual trigger
+
 jobs:
-  evolve:
+  coordinate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup AI Runtime
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run Orchestrator
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          python3 core/agent_ultimate_v9.py --auto-improve
-          sh core/supabase_sync.sh
+          pip install supabase requests
+          python3 core/orchestrator.py
+          
       - name: Auto-Commit Upgrades
         run: |
-          git config --global user.name "Hoopstreet-AI"
-          git config --global user.email "charles@hoopstreet.com"
-          git add . && git commit -m "🤖 [Auto-Evolution] DNA Refined" || exit 0
+          git config --global user.name "Hoopstreet-AI-Agent"
+          git config --global user.email "agent@hoopstreet.com"
+          git add .
+          git commit -m "🤖 [Auto-Adoption] Real-time DNA Upgrade $(date)" || echo "No changes"
           git push
