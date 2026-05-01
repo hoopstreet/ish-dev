@@ -128,7 +128,7 @@ for pid, pcode in phases:
 print("\n🚀 PIPELINE STATUS: COMPLETE")
 
 if FAILED_PHASES:
-    print("⚠️ Some phases failed - auto-recovery attempted")
+    print("⚠️ Some phases failed + auto-recovery attempted")
 else:
     print("🎉 ALL PHASES PASSED")
 

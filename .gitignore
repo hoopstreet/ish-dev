@@ -30,3 +30,6 @@ logs.txt
 # OS
 .DS_Store
 Thumbs.db
+.hoopstreet/
+*.env
+credentials.json

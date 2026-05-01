@@ -16,11 +16,11 @@ echo "     🏀 HOOPSTREET iSH DEV SYSTEM"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 echo "Installing Hoopstreet System..."
-mkdir -p /root/hoopstreet
-cp -r agent/* /root/hoopstreet/
-chmod +x /root/hoopstreet/*.sh 2>/dev/null
-chmod +x /root/hoopstreet/*.py 2>/dev/null
-ln -sf /root/hoopstreet/menu.sh /root/menu
+mkdir -p /root/ish-dev/core
+cp -r agent/* /root/ish-dev/core/
+chmod +x /root/ish-dev/core/*.sh 2>/dev/null
+chmod +x /root/ish-dev/core/*.py 2>/dev/null
+ln -sf /root/ish-dev/core/menu.sh /root/menu
 echo ""
 echo "✅ Installation complete!"
 echo ""
@@ -46,9 +46,9 @@ while true; do
     printf "👉 Choose (1-4): "
     read choice
     case $choice in
-        1) /root/hoopstreet/code.sh ;;
+        1) /root/ish-dev/core/code.sh ;;
         2) echo "System OK"; sleep 2 ;;
-        3) python3 /root/hoopstreet/heal.py 2>/dev/null; sleep 2 ;;
+        3) python3 /root/ish-dev/core/heal.py 2>/dev/null; sleep 2 ;;
         4) echo "Goodbye!"; exit 0 ;;
         *) echo "Invalid choice"; sleep 1 ;;
     esac
@@ -66,6 +66,6 @@ echo "════════════════════════�
 echo ""
 echo "Paste your multi-phase code (type END on new line):"
 echo ""
-python3 /root/hoopstreet/run.py
+python3 /root/ish-dev/core/run.py
 CODEEOF
 chmod +x agent/code.sh

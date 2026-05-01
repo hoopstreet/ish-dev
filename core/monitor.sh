@@ -14,8 +14,8 @@ echo "  Disk: $(df -h / | awk 'NR==2{print $5}')"
 echo ""
 
 echo "📁 Hoopstreet Status:"
-echo "  Core scripts: $(ls -1 /root/hoopstreet/*.sh 2>/dev/null | wc -l) files"
-echo "  Python scripts: $(ls -1 /root/hoopstreet/*.py 2>/dev/null | wc -l) files"
+echo "  Core scripts: $(ls -1 /root/ish-dev/core/*.sh 2>/dev/null | wc -l) files"
+echo "  Python scripts: $(ls -1 /root/ish-dev/core/*.py 2>/dev/null | wc -l) files"
 echo "  Documentation: $(ls -1 /root/ish-dev/*.md 2>/dev/null | wc -l) files"
 echo ""
 

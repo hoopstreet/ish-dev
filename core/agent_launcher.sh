@@ -13,4 +13,4 @@ if [ ! -f /etc/alpine-release ]; then
 fi
 
 # Launch menu
-exec /root/hoopstreet/menu.sh
+exec /root/ish-dev/core/menu.sh

@@ -1,0 +1,21 @@
+name: Hoopstreet 24/7 Autonomous Engine
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  push:
+    branches: [ main ]
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup AI Runtime
+        run: |
+          python3 core/agent_ultimate_v9.py --auto-improve
+          sh core/supabase_sync.sh
+      - name: Auto-Commit Upgrades
+        run: |
+          git config --global user.name "Hoopstreet-AI"
+          git config --global user.email "charles@hoopstreet.com"
+          git add . && git commit -m "🤖 [Auto-Evolution] DNA Refined" || exit 0
+          git push

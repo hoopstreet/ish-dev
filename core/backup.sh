@@ -1,14 +1,14 @@
 #!/bin/sh
 # BACKUP/RESTORE UTILITY
 
-BACKUP_DIR="/root/hoopstreet_backups"
+BACKUP_DIR="/root/ish-dev/core_backups"
 mkdir -p "$BACKUP_DIR"
 
 case "$1" in
     backup)
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         BACKUP_FILE="$BACKUP_DIR/hoopstreet_backup_$TIMESTAMP.tar.gz"
-        tar -czf "$BACKUP_FILE" /root/hoopstreet /root/ish-dev 2>/dev/null
+        tar -czf "$BACKUP_FILE" /root/ish-dev/core /root/ish-dev 2>/dev/null
         echo "✅ Backup created: $BACKUP_FILE"
         ;;
     restore)

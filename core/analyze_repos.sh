@@ -111,8 +111,8 @@ cp /root/ish-dev/DNA.md key_files/ 2>/dev/null
 cp /root/ish-dev/ROADMAP.md key_files/ 2>/dev/null
 cp /root/ish-dev/status.json key_files/ 2>/dev/null
 cp /root/ish-dev/logs.txt key_files/ 2>/dev/null
-cp /root/hoopstreet/menu.sh key_files/ 2>/dev/null
-cp /root/hoopstreet/agent.py key_files/ 2>/dev/null
+cp /root/ish-dev/core/menu.sh key_files/ 2>/dev/null
+cp /root/ish-dev/core/agent.py key_files/ 2>/dev/null
 
 tar -rzf hoopstreet_analysis.tar.gz key_files/ 2>/dev/null
 # ============================================================

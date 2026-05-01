@@ -15,7 +15,7 @@ while true; do
     python3 -m compileall . > /tmp/check 2>&1
     if grep -q "SyntaxError" /tmp/check; then
         echo "⚠️  Syntax Error Found. Triggering AI..."
-        sh /root/hoopstreet/trigger.sh
+        sh /root/ish-dev/core/trigger.sh
     fi
     
     echo "💤 Agent sleeping for 60s..."

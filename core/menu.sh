@@ -1,27 +1,58 @@
 #!/bin/sh
+# 🏀 HOOPSTREET iSH-DEV | STABILIZED MASTER v10.5
+
 while true; do
     clear
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET iSH-DEV | VERSION v10.5 (STABLE)"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " 📋 MAIN MENU"
+    echo "🏀 HOOPSTREET iSH AUTO HEALING AGENT v10.5"
+    echo "═══════════════════════════════════════════════════════"
     echo ""
-    echo "1. 🤖 Agent       - Master Gemini CLI v12.1"
-    echo "2. 🔄 Sync        - GitHub Push/Pull"
-    echo "3. 🔧 Heal        - Auto-Repair Engine"
-    echo "4. 📊 Status      - DNA & System Health"
-    echo "5. 🔗 Remote      - GitHub Repository"
-    echo "6. 🔐 Credentials - Token Manager"
-    echo "0. 🚪 Exit"
+    echo "  📋 MAIN MENU"
     echo ""
-    read -p "👉 Choose (0-6): " c
-    case $c in
-        1) python3 /root/ish-dev/core/agent_ultimate_v9.py ;;
-        2) sh /root/ish-dev/core/sync.sh ;;
-        3) sh /root/ish-dev/core/heal.sh ;;
-        4) sh /root/ish-dev/core/status.sh ;;
-        5) echo "Remote: ish-dev connected." && sleep 1 ;;
-        6) sh /root/ish-dev/core/creds.sh ;;
-        0) exit 0 ;;
+    echo "  1. 🤖 Agent       - Smart executor (Input Code Mode)"
+    echo "  2. 🔄 Sync        - Git push/pull with auto-version"
+    echo "  3. 🔧 Heal        - Auto-fix common bugs / DNA Restore"
+    echo "  4. 📊 Status      - View DNA, roadmap, logs"
+    echo "  5. 🔗 Remote      - GitHub Projects Manager"
+    echo "  6. 🔐 Credentials - Secure Token Storage"
+    echo "  7. 🤖 AI Sync     - Trigger GitHub Actions"
+    echo "  0. 🚪 Exit        - Exit to shell"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf "👉 Choose (0-7): "
+    read choice
+
+    case "$choice" in
+        1)
+            echo "🚀 Launching AI Agent... (Type your code then END)"
+            echo "---------------------------------------------------"
+            # Launch the actual python logic directly to avoid launcher crashes
+            python3 /root/ish-dev/core/agent.py
+            echo "---------------------------------------------------"
+            echo "✅ Agent Session Ended. Press Enter to return to menu..."
+            read junk
+            ;;
+        2)
+            git pull origin main
+            echo "Press Enter..." && read junk ;;
+        3)
+            sh /root/ish-dev/core/recover_all.sh
+            echo "Press Enter..." && read junk ;;
+        4)
+            echo "📊 DNA STATUS: $(ls /root/ish-dev/core/ | wc -l) Fragments"
+            read junk ;;
+        5)
+            sh /root/ish-dev/core/github_setup.sh
+            read junk ;;
+        6)
+            python3 /root/ish-dev/core/load_keys.py
+            read junk ;;
+        7)
+            git push origin main
+            echo "AI Sync Triggered. Press Enter..."
+            read junk ;;
+        0)
+            exit 0 ;;
+        *)
+            sleep 1 ;;
     esac
 done

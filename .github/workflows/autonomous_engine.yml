@@ -1,0 +1,27 @@
+name: 24/7 Hoopstreet Evolution
+on:
+  schedule:
+    - cron: '*/20 * * * *'
+  push:
+    branches: [ main ]
+jobs:
+  auto_update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Credentials
+        run: |
+          echo "Syncing Supabase Schema and Gemini Pool..."
+      - name: Automated Evolution
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GEMINI_POOL: ${{ secrets.GEMINI_POOL }}
+        run: |
+          # Executes the core logic on GitHub side to match iSH environment
+          python3 core/agent_ultimate_v9.py --auto-mode
+      - name: Commit Results
+        run: |
+          git config --global user.name "Hoopstreet-Bot"
+          git config --global user.email "charles@hoopstreet.com"
+          git add . && git commit -m "🤖 [Auto-Sync] DNA Refined" || exit 0
+          git push
