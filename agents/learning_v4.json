@@ -99,6 +99,71 @@
       "command": "clear",
       "timestamp": "2026-05-01 05:25:49.675750",
       "output": "\u001b[H\u001b[J"
+    },
+    {
+      "command": "chmod +x /root/ish-dev/core/menu.sh",
+      "timestamp": "2026-05-01 05:26:49.784012",
+      "output": ""
+    },
+    {
+      "command": "ln -sf /root/ish-dev/core/menu.sh /root/menu",
+      "timestamp": "2026-05-01 05:26:49.846289",
+      "output": ""
+    },
+    {
+      "command": "cd /root/ish-dev && git pull",
+      "timestamp": "2026-05-01 05:26:53.170227",
+      "output": "Already up to date.\n"
+    },
+    {
+      "command": "cat > /root/ish-dev/core/menu.sh << 'MENUFINAL'",
+      "timestamp": "2026-05-01 05:26:53.217299",
+      "output": ""
+    },
+    {
+      "command": "#!/bin/sh",
+      "timestamp": "2026-05-01 05:26:53.258064",
+      "output": ""
+    },
+    {
+      "command": "clear",
+      "timestamp": "2026-05-01 05:26:53.346091",
+      "output": "\u001b[H\u001b[J"
+    },
+    {
+      "command": "echo \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"",
+      "timestamp": "2026-05-01 05:26:53.390773",
+      "output": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    },
+    {
+      "command": "echo \"\ud83d\udcf2 HOOPSTREET ISH-DEV IPHONE \ud83e\udd33 v10.0.7\"",
+      "timestamp": "2026-05-01 05:26:53.434271",
+      "output": "\ud83d\udcf2 HOOPSTREET ISH-DEV IPHONE \ud83e\udd33 v10.0.7\n"
+    },
+    {
+      "command": "echo \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"",
+      "timestamp": "2026-05-01 05:26:53.477825",
+      "output": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    },
+    {
+      "command": "echo \"\"",
+      "timestamp": "2026-05-01 05:26:53.521336",
+      "output": "\n"
+    },
+    {
+      "command": "echo \" \ud83d\udccb MAIN MENU\"",
+      "timestamp": "2026-05-01 05:26:53.565518",
+      "output": " \ud83d\udccb MAIN MENU\n"
+    },
+    {
+      "command": "echo \"\"",
+      "timestamp": "2026-05-01 05:26:53.612142",
+      "output": "\n"
+    },
+    {
+      "command": "echo \"1. \ud83e\udd16 Agent       - Self-Improving AI Agent\"",
+      "timestamp": "2026-05-01 05:26:53.660091",
+      "output": "1. \ud83e\udd16 Agent       - Self-Improving AI Agent\n"
     }
   ],
   "failed_commands": [
@@ -118,9 +183,14 @@
       "error": "/bin/sh: syntax error: unexpected \")\"\n"
     },
     {
-      "command": ";;",
-      "timestamp": "2026-05-01 05:25:51.548621",
-      "error": "/bin/sh: syntax error: unexpected \";;\"\n"
+      "command": "python3 /root/ish-dev/core/agent_self_improving.py",
+      "timestamp": "2026-05-01 05:26:49.725027",
+      "error": "Timeout"
+    },
+    {
+      "command": "while true; do",
+      "timestamp": "2026-05-01 05:26:53.300623",
+      "error": "/bin/sh: syntax error: unexpected end of file (expecting \"done\")\n"
     }
   ],
   "learned_patterns": [
@@ -134,9 +204,9 @@
     }
   ],
   "stats": {
-    "total_executions": 24,
-    "total_success": 20,
-    "total_failed": 4,
+    "total_executions": 38,
+    "total_success": 33,
+    "total_failed": 5,
     "self_heals": 0
   }
 }
