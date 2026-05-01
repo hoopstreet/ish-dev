@@ -17,7 +17,7 @@ while true; do
     printf "👉 Choose (0-6): "
     read choice
     case "$choice" in
-        1) task "Launch agent" ;;
+        1) python3 /root/ish-dev/core/agent_ultimate_v9.py ;;
         2) sh /root/ish-dev/core/sync.sh ;;
         3) sh /root/ish-dev/core/heal.sh ;;
         4) sh /root/ish-dev/core/status.sh ;;
