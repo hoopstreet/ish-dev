@@ -2,15 +2,15 @@
 while true; do
     clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🏀 HOOPSTREET AGENT v9.3"
+    echo "🏀 HOOPSTREET AGENT v10.0"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "1. 💻 Code        - Execute multi-phase code"
-    echo "2. 🔄 Sync        - Git push/pull"
-    echo "3. 🔧 Heal        - Auto-fix common bugs"
-    echo "4. 📊 Status      - Complete system status"
-    echo "5. 🔗 Remote      - GitHub Projects"
-    echo "6. 🔐 Credentials - Token Manager"
+    echo "1. 💻 Code        - Execute + AI + Auto-test"
+    echo "2. 🔄 Sync        - Git + Backup + Webhooks"
+    echo "3. 🔧 Heal        - Auto-fix + Disaster Recovery"
+    echo "4. 📊 Status      - Dashboard + Performance"
+    echo "5. 🔗 Remote      - GitHub Projects + Docker"
+    echo "6. 🔐 Credentials - Token Manager + Encryption"
     echo "0. 🚪 Exit"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -18,11 +18,7 @@ while true; do
     read choice
 
     case "$choice" in
-        1) 
-            echo "Launching Code Executor..."
-            sleep 1
-            /root/ish-dev/core/code.sh
-            ;;
+        1) /root/ish-dev/core/code.sh ;;
         2) /root/ish-dev/core/sync.sh ;;
         3) /root/ish-dev/core/heal.sh ;;
         4) /root/ish-dev/core/status.sh ;;

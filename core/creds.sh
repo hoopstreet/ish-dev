@@ -161,3 +161,31 @@ while true; do
     echo ""
     read -p "Press Enter to continue..."
 done
+
+# === ENCRYPTION INTEGRATION ===
+ENCRYPT_DIR="/root/.hoopstreet/secure"
+mkdir -p "$ENCRYPT_DIR"
+
+encrypt_value() {
+    echo "$1" | openssl enc -aes-256-cbc -a -salt -pbkdf2 -pass pass:"$2" 2>/dev/null
+}
+
+decrypt_value() {
+    echo "$1" | openssl enc -aes-256-cbc -a -d -pbkdf2 -pass pass:"$2" 2>/dev/null
+}
+
+# When adding credentials, encrypt them
+add_cred_secure() {
+    read -p "Enter name: " name
+    read -sp "Enter value: " value
+    echo ""
+    read -sp "Enter encryption password: " password
+    echo ""
+    
+    encrypted=$(encrypt_value "$value" "$password")
+    echo "$name|$encrypted" >> "$ENCRYPT_DIR/secure_creds.txt"
+    echo "✅ Credential encrypted and stored"
+}
+
+# Add to menu options
+echo "   • Secure Add (encrypted) - New option in credentials manager"

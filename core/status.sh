@@ -228,3 +228,28 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 printf "Press Enter to continue..."
 read dummy
+
+# === PERFORMANCE METRICS ===
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📈 PERFORMANCE STATISTICS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# System metrics
+PHASES_EXECUTED=$(grep -c "SUCCESS" /root/ish-dev/docs/logs.txt 2>/dev/null)
+TOTAL_HEALS=$(grep -c "Fixed" /root/ish-dev/docs/logs.txt 2>/dev/null)
+DISK_USAGE=$(df -h / | awk 'NR==2{print $5}')
+BACKUP_COUNT=$(ls -1 /root/ish-dev/backups/pre_sync/*.tar.gz 2>/dev/null | wc -l)
+
+echo "📊 Executed phases: $PHASES_EXECUTED"
+echo "🔧 Auto-heals performed: $TOTAL_HEALS"
+echo "💾 Available backups: $BACKUP_COUNT"
+echo "📀 Disk usage: $DISK_USAGE"
+
+# AI effectiveness
+ERRORS=$(grep -c "FAILED" /root/ish-dev/docs/logs.txt 2>/dev/null)
+if [ $ERRORS -gt 0 ]; then
+    echo "⚠️ Recent errors: $ERRORS (run Option 3 to heal)"
+else
+    echo "✅ No recent errors detected"
+fi

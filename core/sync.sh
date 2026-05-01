@@ -119,3 +119,28 @@ echo "  📊 status.json updated"
 echo ""
 printf "Press Enter to continue..."
 read dummy
+
+# === AUTO-BACKUP BEFORE SYNC ===
+echo "💾 Creating pre-sync backup..."
+BACKUP_DIR="/root/ish-dev/backups/pre_sync"
+mkdir -p "$BACKUP_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+tar -czf "$BACKUP_DIR/pre_sync_$TIMESTAMP.tar.gz" \
+    /root/ish-dev/docs/DNA.md \
+    /root/ish-dev/docs/logs.txt \
+    /root/ish-dev/projects.json \
+    /root/.hoopstreet/creds/ 2>/dev/null
+echo "✅ Pre-sync backup created: $TIMESTAMP"
+
+# Keep last 7 backups only
+find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete
+
+# === WEBHOOK NOTIFICATION ===
+WEBHOOK_URL="${WEBHOOK_URL:-}"
+if [ -n "$WEBHOOK_URL" ]; then
+    VERSION=$(cat /root/ish-dev/docs/status.json | grep version | cut -d'"' -f4)
+    curl -X POST "$WEBHOOK_URL" \
+        -H "Content-Type: application/json" \
+        -d "{\"content\":\"🏀 Hoopstreet Sync: $VERSION\"}" \
+        2>/dev/null
+fi

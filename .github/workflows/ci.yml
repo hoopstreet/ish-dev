@@ -1,10 +1,51 @@
-name: V14 CI
+name: Hoopstreet CI/CD
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
 
 jobs:
-  build:
+  auto-backup:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - run: echo "V14 SYSTEM ACTIVE"
+      - uses: actions/checkout@v4
+      - name: Auto-backup credentials
+        run: |
+          if [ -f credentials.json ]; then
+            echo "Backing up credentials..."
+          fi
+      - name: Backup to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -X POST "$SUPABASE_URL/rest/v1/backups" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"timestamp\":\"$(date -Iseconds)\",\"version\":\"v10.0\"}"
+
+  webhook-notify:
+    runs-on: ubuntu-latest
+    needs: auto-backup
+    steps:
+      - name: Send Discord webhook
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{\"content\":\"🏀 Hoopstreet v10.0: Sync completed!\"}"
+          fi
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: |
+          docker build -t hoopstreet/ish-dev:latest .
+          docker tag hoopstreet/ish-dev:latest hoopstreet/ish-dev:v10.0

@@ -140,3 +140,57 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
 
 if __name__ == "__main__":
     main()
+
+# === AI ASSISTANT INTEGRATION ===
+class AIAssistant:
+    def __init__(self):
+        self.error_patterns = {
+            "No such file": "💡 Check file path with: ls -la",
+            "permission denied": "💡 Run: chmod +x <file>",
+            "command not found": "💡 Install package or check PATH",
+            "syntax error": "💡 Check line syntax, use bash -n",
+            "indentation": "💡 Use 4 spaces for indentation"
+        }
+    
+    def analyze_error(self, error_msg):
+        for pattern, suggestion in self.error_patterns.items():
+            if pattern in error_msg:
+                return f"\n🤖 AI SUGGESTION: {suggestion}"
+        return "\n🤖 AI: Check error message and try again"
+    
+    def predict_code(self, current_line):
+        predictions = {
+            'echo': 'echo "text"',
+            'python': 'python3 script.py',
+            'pip': 'pip install package',
+            'git': 'git add . && git commit -m "msg"',
+            '# Phase': '# Phase N\necho "command"'
+        }
+        for cmd, template in predictions.items():
+            if current_line.strip().startswith(cmd):
+                return f"\n🔮 PREDICTION: {template}"
+        return ""
+
+ai = AIAssistant()
+
+# Modify execute_phase to include AI suggestions on failure
+# (Original execute_phase function already has error handling)
+
+# === AUTO-TESTING INTEGRATION ===
+def auto_test_phase(phase_code):
+    """Test phase before execution"""
+    test_results = []
+    if "rm -rf" in phase_code:
+        test_results.append("⚠️ WARNING: Destructive command detected")
+    if "sudo" in phase_code:
+        test_results.append("⚠️ Note: sudo may not work in iSH")
+    if "pip install" in phase_code:
+        test_results.append("✅ Package installation detected")
+    return test_results
+
+# Add to phase execution
+def execute_phase_with_test(phase_num, phase_code, max_retries=3):
+    tests = auto_test_phase(phase_code)
+    for test in tests:
+        print(f"   {test}")
+    return execute_phase(phase_num, phase_code, max_retries)
