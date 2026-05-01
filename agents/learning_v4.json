@@ -49,6 +49,56 @@
       "command": "echo \"1. \ud83e\udd16 Agent       - Self-Improving AI Agent\"",
       "timestamp": "2026-05-01 05:25:39.377852",
       "output": "1. \ud83e\udd16 Agent       - Self-Improving AI Agent\n"
+    },
+    {
+      "command": "cd /root/ish-dev && git add -A && git commit -m 'Auto-sync' && git push",
+      "timestamp": "2026-05-01 05:25:47.014920",
+      "output": "[main 62f5bac] Auto-sync\n 22 files changed, 657 insertions(+), 106 deletions(-)\n create mode 100644 agents/learning_v4.json\n create mode 100755 core/agent_self_improving.py\n rewrite core/code.sh (73%)"
+    },
+    {
+      "command": "/root/ish-dev/core/heal.sh",
+      "timestamp": "2026-05-01 05:25:49.310927",
+      "output": "\u001b[H\u001b[J\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\ud83d\udd27 HEAL ENGINE - AUTO REPAIR\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n\ud83d\udd0d Scanning for bugs...\n\n1. Checking for a - b bugs...\n\n2."
+    },
+    {
+      "command": "echo \"5. \ud83d\udd17 Remote      - GitHub Projects + Docker\"",
+      "timestamp": "2026-05-01 05:25:49.343987",
+      "output": "5. \ud83d\udd17 Remote      - GitHub Projects + Docker\n"
+    },
+    {
+      "command": "echo \"6. \ud83d\udd10 Credentials - Token Manager + Encryption\"",
+      "timestamp": "2026-05-01 05:25:49.380894",
+      "output": "6. \ud83d\udd10 Credentials - Token Manager + Encryption\n"
+    },
+    {
+      "command": "echo \"0. \ud83d\udeaa Exit             - Back to localhost:~#\"",
+      "timestamp": "2026-05-01 05:25:49.414841",
+      "output": "0. \ud83d\udeaa Exit             - Back to localhost:~#\n"
+    },
+    {
+      "command": "echo \"\"",
+      "timestamp": "2026-05-01 05:25:49.449131",
+      "output": "\n"
+    },
+    {
+      "command": "echo \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"",
+      "timestamp": "2026-05-01 05:25:49.484488",
+      "output": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    },
+    {
+      "command": "printf \"\ud83d\udc49 Choose (0-6): \"",
+      "timestamp": "2026-05-01 05:25:49.521300",
+      "output": "\ud83d\udc49 Choose (0-6): "
+    },
+    {
+      "command": "read choice",
+      "timestamp": "2026-05-01 05:25:49.558485",
+      "output": ""
+    },
+    {
+      "command": "clear",
+      "timestamp": "2026-05-01 05:25:49.675750",
+      "output": "\u001b[H\u001b[J"
     }
   ],
   "failed_commands": [
@@ -56,6 +106,21 @@
       "command": "while true; do",
       "timestamp": "2026-05-01 05:25:39.149876",
       "error": "/bin/sh: syntax error: unexpected end of file (expecting \"done\")\n"
+    },
+    {
+      "command": "case \"$choice\" in",
+      "timestamp": "2026-05-01 05:25:49.596964",
+      "error": "/bin/sh: syntax error: unexpected end of file (expecting \")\")\n"
+    },
+    {
+      "command": "1)",
+      "timestamp": "2026-05-01 05:25:49.634972",
+      "error": "/bin/sh: syntax error: unexpected \")\"\n"
+    },
+    {
+      "command": ";;",
+      "timestamp": "2026-05-01 05:25:51.548621",
+      "error": "/bin/sh: syntax error: unexpected \";;\"\n"
     }
   ],
   "learned_patterns": [
@@ -69,9 +134,9 @@
     }
   ],
   "stats": {
-    "total_executions": 11,
-    "total_success": 10,
-    "total_failed": 1,
+    "total_executions": 24,
+    "total_success": 20,
+    "total_failed": 4,
     "self_heals": 0
   }
 }
