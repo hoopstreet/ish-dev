@@ -37,7 +37,7 @@ find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete 2>/dev/null
 # Pull latest
 echo ""
 echo "📥 Pulling latest changes..."
-git pull origin main --quiet
+git pull origin main
 echo "✅ Pull complete"
 
 # Add changes
@@ -49,33 +49,24 @@ echo "✅ Files staged"
 # Commit
 echo ""
 echo "📝 Committing changes..."
-git commit -m "$NEW_VERSION: Auto-sync from iSH - $(date '+%Y-%m-%d %H:%M:%S')" --quiet
+git commit -m "$NEW_VERSION: Auto-sync from iSH - $(date '+%Y-%m-%d %H:%M:%S')"
 echo "✅ Commit complete"
 
-# Create tag
+# Create tag (fixed: removed --quiet)
 echo ""
 echo "🏷️ Creating tag: $NEW_VERSION"
-git tag -a "$NEW_VERSION" -m "$NEW_VERSION: Auto-sync from iSH" --quiet
+git tag -a "$NEW_VERSION" -m "$NEW_VERSION: Auto-sync from iSH"
 echo "✅ Tag created"
 
 # Push
 echo ""
 echo "📤 Pushing to GitHub..."
-git push origin main --quiet
-git push origin "$NEW_VERSION" --quiet
+git push origin main
+git push origin "$NEW_VERSION"
 echo "✅ Push complete"
 
 # Update status.json
 sed -i "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" docs/status.json
-
-# Webhook notification (if configured)
-WEBHOOK_URL="${WEBHOOK_URL:-}"
-if [ -n "$WEBHOOK_URL" ]; then
-    curl -X POST "$WEBHOOK_URL" \
-        -H "Content-Type: application/json" \
-        -d "{\"content\":\"🏀 Hoopstreet Sync: $CURRENT_VERSION → $NEW_VERSION\"}" \
-        2>/dev/null
-fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

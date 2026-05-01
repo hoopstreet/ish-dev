@@ -74,3 +74,18 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "Press Enter to continue..."
 read dummy
+
+# 4. Fix Python file permissions
+echo ""
+echo "4. Fixing Python file permissions..."
+find /root/ish-dev -name "*.py" -exec chmod +x {} \; 2>/dev/null
+echo "   ✅ Python permissions fixed"
+
+# 5. Check for missing dependencies
+echo ""
+echo "5. Checking dependencies..."
+if ! command -v jq &> /dev/null; then
+    echo "   ⚠️ jq not found - installing..."
+    pip3 install jq 2>/dev/null
+fi
+echo "   ✅ Dependencies OK"
