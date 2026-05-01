@@ -1,33 +1,37 @@
-#!/usr/bin/env python3
-#!/usr/bin/env python3
-import requests, json, os
-from datetime import datetime
+import telebot
+import subprocess
+import os
+import sys
 
-class TelegramBot:
-    def __init__(self, token, chat_id):
-        self.token = token
-        self.chat_id = chat_id
-        self.base_url = f"https://api.telegram.org/bot{token}"
+# Flush all prints immediately for logging
+def log(msg):
+    print(f">> {msg}")
+    sys.stdout.flush()
+
+TOKEN = "8162842268:AAFxPzIsbc3zg0CvSkzdf04OYR6UKgLfOY4"
+log("Initializing Bot...")
+
+try:
+    bot = telebot.TeleBot(TOKEN)
     
-    def send_message(self, text):
-        url = f"{self.base_url}/sendMessage"
-        data = {"chat_id": self.chat_id, "text": text}
+    @bot.message_handler(commands=['start', 'help'])
+    def send_welcome(message):
+        log(f"Received command from {message.chat.id}")
+        bot.reply_to(message, "🚀 Ai-Coder Bot Active.\n\nSystem: Online\nGitHub: Connected\nSupabase: Syncing...")
+
+    @bot.message_handler(func=lambda message: True)
+    def handle_task(message):
+        task = message.text
+        log(f"Processing task: {task}")
+        bot.reply_to(message, f"🛠 Running: {task}")
         try:
-            requests.post(url, json=data)
-        except:
-            pass
-    
-    def send_status(self):
-        with open("/root/ish-dev/docs/status.json", 'r') as f:
-            status = json.load(f)
-        msg = f"🏀 Hoopstreet Status\nVersion: {status['version']}\nHealth: {status['health']}"
-        self.send_message(msg)
+            res = subprocess.check_output(["python3", "/root/Ai-Coder/agent.py", task], stderr=subprocess.STDOUT)
+            bot.reply_to(message, f"✅ Done:\n{res.decode()[-800:]}")
+        except Exception as e:
+            log(f"Error: {str(e)}")
+            bot.reply_to(message, f"❌ Error: {str(e)}")
 
-# Usage: python3 telegram_bot.py "message"
-if __name__ == "__main__":
-    import sys
-    token = os.environ.get('TELEGRAM_TOKEN', '')
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
-    if token and chat_id and len(sys.argv) > 1:
-        bot = TelegramBot(token, chat_id)
-        bot.send_message(sys.argv[1])
+    log("Bot is now polling...")
+    bot.infinity_polling()
+except Exception as e:
+    log(f"CRITICAL ERROR: {str(e)}")
