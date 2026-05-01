@@ -2,12 +2,12 @@
 while true; do
     clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0"
+    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0.3"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo " 📋 MAIN MENU"
     echo ""
-    echo "1. 💻 Code         - Execute multi-phase code"
+    echo "1. 🤖 Agent       - AI Agent (Natural Language + Code)"
     echo "2. 🔄 Sync          - Git push/pull + Backup"
     echo "3. 🔧 Heal           - Auto-fix + Recovery"
     echo "4. 📊 Status        - Complete system + Metrics"
@@ -20,7 +20,11 @@ while true; do
     read choice
 
     case "$choice" in
-        1) /root/ish-dev/core/code.sh ;;
+        1) 
+            echo "🤖 Launching AI Agent..."
+            sleep 1
+            python3 /root/ish-dev/core/agent_unified.py
+            ;;
         2) /root/ish-dev/core/sync.sh ;;
         3) /root/ish-dev/core/heal.sh ;;
         4) /root/ish-dev/core/status.sh ;;
