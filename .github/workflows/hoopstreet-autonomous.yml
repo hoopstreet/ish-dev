@@ -1,24 +1,32 @@
-# .github/workflows/hoopstreet-autonomous.yml
-name: 24/7 Auto-Healing Sync
+name: 24/7 Hoopstreet Autonomous Agent
 on:
-  push:
-    branches: [ main ]
   schedule:
-    - cron: '*/30 * * * *' # Runs every 30 mins for 24/7 health checks
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
-  sync:
+  coordinate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: DNA Integrity Check & Merge
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run Orchestrator
         env:
-          GEMINI_POOL: ${{ secrets.GEMINI_POOL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          python3 core/ai_sync.py --mode=autonomous
-          git config --global user.name "Hoopstreet-AI-Bot"
-          git config --global user.email "bot@hoopstreet.com"
-          git add . && git commit -m "🤖 [Auto-Heal] DNA Synchronized" || echo "No changes"
+          pip install supabase requests
+          python3 core/orchestrator.py
+          
+      - name: Auto-Commit Upgrades
+        run: |
+          git config --global user.name "Hoopstreet-AI-Agent"
+          git config --global user.email "agent@hoopstreet.com"
+          git add .
+          git commit -m "🤖 [Auto-Adoption] Real-time DNA Upgrade $(date)" || echo "No changes"
           git push
