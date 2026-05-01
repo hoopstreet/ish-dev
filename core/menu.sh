@@ -25,6 +25,6 @@ while true; do
         5) /root/ish-dev/core/remote.sh ;;
         6) /root/ish-dev/core/creds.sh ;;
         0) echo "Goodbye!"; exit 0 ;;
-        *) echo "Invalid. Please enter 0-6"; sleep 1 ;;
+        *) echo "Invalid. Enter 0-6"; sleep 1 ;;
     esac
 done
