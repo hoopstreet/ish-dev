@@ -2,7 +2,7 @@
 while true; do
     clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0.3"
+    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0.4"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo " 📋 MAIN MENU"
@@ -21,16 +21,36 @@ while true; do
 
     case "$choice" in
         1) 
+            echo ""
             echo "🤖 Launching AI Agent..."
             sleep 1
-            python3 /root/ish-dev/core/agent_unified.py
+            clear
+            /root/ish-dev/launch_agent.sh
             ;;
-        2) /root/ish-dev/core/sync.sh ;;
-        3) /root/ish-dev/core/heal.sh ;;
-        4) /root/ish-dev/core/status.sh ;;
-        5) /root/ish-dev/core/remote.sh ;;
-        6) /root/ish-dev/core/creds.sh ;;
-        0) echo ""; echo "👋 Goodbye!"; echo "localhost:~#"; exit 0 ;;
-        *) echo "❌ Invalid. Enter 0-6"; sleep 1 ;;
+        2) 
+            /root/ish-dev/core/sync.sh
+            ;;
+        3) 
+            /root/ish-dev/core/heal.sh
+            ;;
+        4) 
+            /root/ish-dev/core/status.sh
+            ;;
+        5) 
+            /root/ish-dev/core/remote.sh
+            ;;
+        6) 
+            /root/ish-dev/core/creds.sh
+            ;;
+        0) 
+            echo ""
+            echo "👋 Goodbye!"
+            echo "localhost:~#"
+            exit 0
+            ;;
+        *) 
+            echo "❌ Invalid. Enter 0-6"
+            sleep 1
+            ;;
     esac
 done
