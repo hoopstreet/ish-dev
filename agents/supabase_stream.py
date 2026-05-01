@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import time
 
 def stream_log(event):

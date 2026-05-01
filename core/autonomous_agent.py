@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET AUTONOMOUS AI AGENT v10.0
 - Multi-layer API failover (Gemini → OpenRouter Free → OpenRouter Paid)

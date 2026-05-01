@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 import os, requests, random
 from dotenv import load_dotenv
 

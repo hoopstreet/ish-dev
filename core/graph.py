@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json,os
 
 MEM="/root/ish-dev/memory/graph.json"

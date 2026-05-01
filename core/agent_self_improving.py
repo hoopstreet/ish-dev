@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET SELF-IMPROVING AI AGENT v4.0
 - Self-learning from past commands

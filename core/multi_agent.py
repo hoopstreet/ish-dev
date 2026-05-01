@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET MULTI-AGENT SYSTEM
 - Gemini CLI Mode

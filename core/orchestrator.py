@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os, sys, requests, json, subprocess, time, re
 from concurrent.futures import ThreadPoolExecutor
 

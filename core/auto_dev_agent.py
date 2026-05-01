@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET AUTOMATED DEVELOPER AGENT v12.0
 - NO human interaction + fully automated

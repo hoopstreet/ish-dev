@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET ALL-IN-ONE AI AGENT v8.0
 - Developer, Coder, Prompt, Executor, Automated Setup

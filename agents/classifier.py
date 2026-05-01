@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 def classify(err):
     e = err.lower()
 

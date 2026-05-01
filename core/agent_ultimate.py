@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET ULTIMATE AI AGENT v6.0
 - Full AI integration (OpenRouter - GPT-4/Claude/Gemini/DeepSeek)

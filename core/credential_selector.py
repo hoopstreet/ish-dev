@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET REAL-TIME CREDENTIAL SELECTOR
 - Tests each API key in real-time

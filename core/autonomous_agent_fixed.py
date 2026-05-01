@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET AUTONOMOUS AI AGENT v10.1 - FIXED
 - Proper API key loading from credentials

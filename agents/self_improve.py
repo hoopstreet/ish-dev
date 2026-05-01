@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from core import Orchestrator
 from ai_debugger import debug_code
 

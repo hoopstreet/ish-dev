@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 HOOPSTREET ULTIMATE PRO AGENT v17.0
 - Auto-failover: Gemini CLI → Open Interpreter → OpenRouter
