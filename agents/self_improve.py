@@ -12,4 +12,4 @@ class SelfImprover:
             fix = debug_code(str(e))
             print("AUTO FIX:", fix)
 
-        print("🔁 Cycle complete - system evolving")
+        print("🔁 Cycle complete + system evolving")

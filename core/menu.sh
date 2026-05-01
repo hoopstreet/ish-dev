@@ -2,16 +2,18 @@
 while true; do
     clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🏀 HOOPSTREET AGENT v10.0"
+    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "1. 💻 Code        - Execute + AI + Auto-test"
-    echo "2. 🔄 Sync        - Git + Backup + Webhooks"
-    echo "3. 🔧 Heal        - Auto-fix + Disaster Recovery"
-    echo "4. 📊 Status      - Dashboard + Performance"
+    echo " 📋 MAIN MENU"
+    echo ""
+    echo "1. 💻 Code         - Execute multi-phase code"
+    echo "2. 🔄 Sync          - Git push/pull + Backup"
+    echo "3. 🔧 Heal           - Auto-fix + Recovery"
+    echo "4. 📊 Status        - Complete system + Metrics"
     echo "5. 🔗 Remote      - GitHub Projects + Docker"
     echo "6. 🔐 Credentials - Token Manager + Encryption"
-    echo "0. 🚪 Exit"
+    echo "0. 🚪 Exit             - Back to localhost:~#"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     printf "👉 Choose (0-6): "
@@ -24,7 +26,7 @@ while true; do
         4) /root/ish-dev/core/status.sh ;;
         5) /root/ish-dev/core/remote.sh ;;
         6) /root/ish-dev/core/creds.sh ;;
-        0) echo "Goodbye!"; exit 0 ;;
-        *) echo "Invalid. Enter 0-6"; sleep 1 ;;
+        0) echo ""; echo "👋 Goodbye!"; echo "localhost:~#"; exit 0 ;;
+        *) echo "❌ Invalid. Enter 0-6"; sleep 1 ;;
     esac
 done

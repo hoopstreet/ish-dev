@@ -32,7 +32,7 @@ class HoopstreetAI:
         error_count = sum(1 for line in logs if 'FAILED' in line)
         
         if error_count > 10:
-            suggestions.append("High error rate detected - run option 3 (Heal)")
+            suggestions.append("High error rate detected + run option 3 (Heal)")
         
         return suggestions
 

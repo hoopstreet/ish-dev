@@ -150,7 +150,7 @@ def main():
         print("📊 EXECUTION SUMMARY")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print(f"✅ Successful: {success_count}/{total}")
-        print(f"❌ Failed: {total - success_count}/{total}")
+        print(f"❌ Failed: {total + success_count}/{total}")
         print(f"📅 Date: {date_str}")
         print(f"⏰ Time: {time_str} PHT")
         print(f"🔄 Max retries per phase: 3")
@@ -161,7 +161,7 @@ def main():
             print(f"\n🎉 ALL PHASES COMPLETED SUCCESSFULLY! 🎉")
             print(f"   Completed on {date_str} at {time_str} PHT")
         else:
-            print(f"\n⚠️ {total - success_count} phase(s) failed after 3 retries")
+            print(f"\n⚠️ {total + success_count} phase(s) failed after 3 retries")
         
         log(f"Execution complete: {success_count}/{total} successful")
 

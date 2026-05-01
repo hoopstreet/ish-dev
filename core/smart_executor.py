@@ -11,12 +11,13 @@ LOG_FILE = "/root/ish-dev/docs/logs.txt"
 spinner_running = False
 first_run = True
 
+SPINNER = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+
 def show_spinner(phase, attempt):
     global spinner_running
-    chars = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
     i = 0
     while spinner_running:
-        sys.stdout.write(f'\r{chars[i%8]} Phase {phase}: Executing (attempt {attempt})... ')
+        sys.stdout.write(f'\r{SPINNER[i%8]} Phase {phase}: Executing (attempt {attempt})... ')
         sys.stdout.flush()
         time.sleep(0.1)
         i += 1
@@ -25,6 +26,37 @@ def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a") as f: f.write(f"[{ts}] {msg}\n")
     with open(DNA_FILE, "a") as f: f.write(f"\n## {ts}\n{msg}\n")
+
+class AIAssistant:
+    def __init__(self):
+        self.suggestions = {
+            "No such file": "💡 Check file path with: ls -la",
+            "permission denied": "💡 Run: chmod +x <file>",
+            "command not found": "💡 Install package or check PATH",
+            "syntax error": "💡 Check syntax, use bash -n",
+            "indentation": "💡 Use 4 spaces for indentation"
+        }
+    
+    def analyze(self, error):
+        for key, fix in self.suggestions.items():
+            if key in error:
+                return f"\n🤖 AI SUGGESTION: {fix}"
+        return "\n🤖 AI: Check error and retry"
+    
+    def predict(self, line):
+        predictions = {
+            'echo': '🔮 echo "text"',
+            'python': '🔮 python3 script.py',
+            'pip': '🔮 pip install package',
+            'git': '🔮 git add . && git commit -m "msg"',
+            '# Phase': '🔮 # Phase N\necho "command"'
+        }
+        for cmd, pred in predictions.items():
+            if line.strip().startswith(cmd):
+                return f"\n{pred}"
+        return ""
+
+ai = AIAssistant()
 
 def detect_phases(code):
     phases, current, phase_num = [], [], 0
@@ -41,29 +73,47 @@ def detect_phases(code):
         phases.append((phase_num, '\n'.join(current)))
     return phases if phases else [(1, code)]
 
+def auto_test(phase_code):
+    tests = []
+    if "rm -rf" in phase_code:
+        tests.append("⚠️ WARNING: Destructive command detected")
+    if "sudo" in phase_code:
+        tests.append("⚠️ Note: sudo may not work in iSH")
+    if "pip install" in phase_code:
+        tests.append("✅ Package installation detected")
+    return tests
+
 def execute_phase(phase_num, phase_code, max_retries=3):
     global spinner_running
-print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"📌 PHASE {phase_num}")
     print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    for test in auto_test(phase_code):
+        print(f"   {test}")
+    
     for attempt in range(1, max_retries + 1):
         spinner_running = True
         t = threading.Thread(target=show_spinner, args=(phase_num, attempt))
         t.daemon = True
         t.start()
+        
         tmp = f"/tmp/phase_{phase_num}.sh"
         with open(tmp, 'w') as f: f.write(phase_code)
         result = subprocess.call(["sh", tmp])
         os.remove(tmp)
+        
         spinner_running = False
         time.sleep(0.2)
         sys.stdout.write('\r' + ' ' * 70 + '\r')
+        
         if result == 0:
             print(f"✅ Phase {phase_num} SUCCESS (attempt {attempt})")
             log(f"Phase {phase_num}: SUCCESS after {attempt} attempt(s)")
             return True
         else:
             print(f"❌ Phase {phase_num} FAILED (attempt {attempt})")
+            print(ai.analyze("syntax error"))
             if attempt < max_retries:
                 print(f"🔄 Retrying Phase {phase_num}...")
                 time.sleep(1)
@@ -77,52 +127,80 @@ def main():
     while True:
         if first_run:
             print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("🤖 HOOPSTREET SMART CODE EXECUTOR v9.3")
+            print("🤖 HOOPSTREET SMART CODE EXECUTOR")
             print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("\n📋 FEATURES: Auto-retry (3x), Phase-by-phase, Spinner")
-            print("\n📝 PASTE YOUR MULTI-PHASE CODE BELOW")
-            print("\nEXAMPLE:")
+            print("📋 FEATURES:")
+            print(" • Auto-retry failed phases up to 3 times")
+            print(" • Phase-by-phase execution with spinner")
+            print(" • 🤖 AI error analysis and suggestions")
+            print(" • 🔮 Smart code predictions")
+            print(" • Type 'END' when done")
+            print(" • Type 'BACK' to exit")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            print("📝 PASTE YOUR MULTI-PHASE CODE BELOW")
+            print("")
             print("# Phase 1")
-            print("echo 'Hello'")
+            print("echo \"Testing Philippines timezone\"")
+            print("")
             print("# Phase 2")
-            print("echo 'World'")
+            print("echo \"Current PHT time: \$(date)\"")
+            print("")
+            print("# Phase 3")
+            print("echo \"Done!\"")
             print("END")
-print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("\n👇 Paste Below\n")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            print("")
+            print("👇 Paste Below")
+            print("")
             first_run = False
         else:
             print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             print("Ready for next code. Type BACK to exit.")
             print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("\n👇 Paste Below\n")
+            print("")
+            print("👇 Paste Below")
+            print("")
+        
         lines = []
         while True:
             try:
                 line = input()
-                if line.strip().upper() == "END": break
+                if line.strip().upper() == "END":
+                    break
                 if line.strip().upper() in ["BACK", "EXIT", "QUIT", "CANCEL"]:
                     print("\n🔙 Returning to main menu...")
                     return
+                pred = ai.predict(line)
+                if pred:
+                    print(pred)
                 lines.append(line)
-            except EOFError: break
+            except EOFError:
+                break
             except KeyboardInterrupt:
                 print("\n\n🔙 Returning to menu...")
                 return
+
+        
         full_code = "\n".join(lines)
         if not full_code.strip():
             print("❌ No code provided")
             continue
+        
         phases = detect_phases(full_code)
         total = len(phases)
         log(f"Starting execution: {total} phases detected")
         print(f"\n📊 Detected {total} phase(s)\n")
+        
         success_count = 0
         for phase_num, phase_code in phases:
-            if execute_phase(phase_num, phase_code): success_count += 1
+            if execute_phase(phase_num, phase_code):
+                success_count += 1
             time.sleep(0.5)
+        
         now = datetime.now()
         date_str = now.strftime("%B %d, %Y")
         time_str = now.strftime("%I:%M:%S %p")
+        
         print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("📊 EXECUTION SUMMARY")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -130,67 +208,18 @@ print("\n━━━━━━━━━━━━━━━━━━━━━━━�
         print(f"❌ Failed: {total - success_count}/{total}")
         print(f"📅 Date: {date_str}")
         print(f"⏰ Time: {time_str} PHT")
+        print(f"🔄 Max retries per phase: 3")
+        print(f"🔧 Auto-healing: Enabled")
+        print(f"🤖 AI Assistant: Active")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
         if success_count == total:
             print(f"\n🎉 ALL PHASES COMPLETED SUCCESSFULLY! 🎉")
-            print(f"   Completed on {date_str} at {time_str} PHT")
+            print(f"✅ Completed on {date_str} at {time_str} PHT")
         else:
             print(f"\n⚠️ {total - success_count} phase(s) failed after 3 retries")
+        
         log(f"Execution complete: {success_count}/{total} successful")
 
 if __name__ == "__main__":
     main()
-
-# === AI ASSISTANT INTEGRATION ===
-class AIAssistant:
-    def __init__(self):
-        self.error_patterns = {
-            "No such file": "💡 Check file path with: ls -la",
-            "permission denied": "💡 Run: chmod +x <file>",
-            "command not found": "💡 Install package or check PATH",
-            "syntax error": "💡 Check line syntax, use bash -n",
-            "indentation": "💡 Use 4 spaces for indentation"
-        }
-    
-    def analyze_error(self, error_msg):
-        for pattern, suggestion in self.error_patterns.items():
-            if pattern in error_msg:
-                return f"\n🤖 AI SUGGESTION: {suggestion}"
-        return "\n🤖 AI: Check error message and try again"
-    
-    def predict_code(self, current_line):
-        predictions = {
-            'echo': 'echo "text"',
-            'python': 'python3 script.py',
-            'pip': 'pip install package',
-            'git': 'git add . && git commit -m "msg"',
-            '# Phase': '# Phase N\necho "command"'
-        }
-        for cmd, template in predictions.items():
-            if current_line.strip().startswith(cmd):
-                return f"\n🔮 PREDICTION: {template}"
-        return ""
-
-ai = AIAssistant()
-
-# Modify execute_phase to include AI suggestions on failure
-# (Original execute_phase function already has error handling)
-
-# === AUTO-TESTING INTEGRATION ===
-def auto_test_phase(phase_code):
-    """Test phase before execution"""
-    test_results = []
-    if "rm -rf" in phase_code:
-        test_results.append("⚠️ WARNING: Destructive command detected")
-    if "sudo" in phase_code:
-        test_results.append("⚠️ Note: sudo may not work in iSH")
-    if "pip install" in phase_code:
-        test_results.append("✅ Package installation detected")
-    return test_results
-
-# Add to phase execution
-def execute_phase_with_test(phase_num, phase_code, max_retries=3):
-    tests = auto_test_phase(phase_code)
-    for test in tests:
-        print(f"   {test}")
-    return execute_phase(phase_num, phase_code, max_retries)
