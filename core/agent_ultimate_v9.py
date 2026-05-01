@@ -1,40 +1,43 @@
-import sys
-import os
-import json
-import subprocess
+import sys, os, time
 from datetime import datetime
 
-# --- CONFIGURATION ---
-DNA_PATH = "/root/ish-dev/docs/DNA.md"
-LOG_PATH = "/root/ish-dev/docs/logs.txt"
+CONFIG = {
+    "VERSION": "12.1-MASTER",
+    "ROOT": "/root/ish-dev",
+    "DNA": "/root/ish-dev/docs/DNA.md"
+}
 
-def log_evolution(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(DNA_PATH, "a") as f:
-        f.write(f"\n[{timestamp}] [GENESIS-AGENT] {message}")
-    with open(LOG_PATH, "a") as f:
-        f.write(f"\n[{timestamp}] Agent Activity: {message}")
+def execute(cmd, label):
+    print(f"⚡ [Gemini CLI] Initiating {label}...")
+    return os.system(cmd)
 
-def run_cli():
+def main():
+    os.system("clear")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("🤖 HOOPSTREET MASTER GEMINI AGENT v11.0")
+    print(f"🤖 HOOPSTREET MASTER GEMINI CLI v{CONFIG['VERSION']}")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("System: Online | Mode: Gemini-CLI Merge")
+    print("System Status: CONNECTED | GitHub: READY")
     
     while True:
-        try:
-            cmd = input("\n👉 Agent Command (or 'exit'): ").strip()
-            if cmd.lower() in ['exit', 'quit', '0']:
-                break
+        cmd = input("\n👉 Command: ").strip().lower()
+        if cmd in ['exit', '0', 'quit']: break
+        
+        # Priority 1: GitHub & Merge Logic
+        if "sync" in cmd or "push" in cmd or "merge" in cmd:
+            execute("sh /root/ish-dev/core/sync.sh", "GitHub Sync")
+        
+        # Priority 2: Recovery & Heal
+        elif "fix" in cmd or "heal" in cmd or "recover" in cmd:
+            execute("sh /root/ish-dev/core/heal.sh", "System Recovery")
             
-            # Here we wrap your task logic
-            print(f"⚡ Processing: {cmd}")
-            # Simulate Gemini interaction or trigger task engine
+        # Priority 3: Adoption of New Files
+        elif "adopt" in cmd or "upgrade" in cmd:
+            print("🚀 Adopting new mutations and merging history...")
+            execute("git pull origin main", "Adoption")
+            
+        else:
+            # Fallback to general system task
             os.system(f"task \"{cmd}\"")
-            
-        except KeyboardInterrupt:
-            break
 
 if __name__ == "__main__":
-    log_evolution("Master Agent v11.0 Initialized")
-    run_cli()
+    main()
