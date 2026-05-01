@@ -89,3 +89,21 @@ if ! command -v jq &> /dev/null; then
     pip3 install jq 2>/dev/null
 fi
 echo "   ✅ Dependencies OK"
+
+# AI-Powered Smart Heal Section
+smart_heal() {
+    local log_file="/root/ish-dev/docs/logs.txt"
+    local last_error=$(tail -n 5 $log_file | grep "Error")
+    
+    if [ ! -z "$last_error" ]; then
+        echo "🤖 Gemini is analyzing the last system error..."
+        local fix=$(gemini "Analyze this iSH error and provide a 1-line shell command fix: $last_error")
+        echo "💡 Suggested Fix: $fix"
+        echo "Do you want to apply this fix? (y/n)"
+        read -r choice
+        if [ "$choice" = "y" ]; then
+            eval "$fix"
+            echo "✅ Fix applied."
+        fi
+    fi
+}

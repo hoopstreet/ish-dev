@@ -1,0 +1,1 @@
+print('Hoopstreet is POWERFUL with all credentials!')

@@ -1,22 +1,17 @@
-# ============================================================
-# AI DEBUGGER LOOP (LLM HOOK SYSTEM)
-# ============================================================
+import subprocess
+import sys
 
-import os
+def ask_gemini(err_msg):
+    try:
+        # Calls your /usr/local/bin/gemini shell script
+        cmd = ["gemini", f"Analyze this error and provide a fix for iSH: {err_msg}"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception as e:
+        return f"Error connecting to Gemini: {str(e)}"
 
-def llm_fix(prompt):
-    """
-    PLACEHOLDER FOR GPT / OPENAI / LOCAL LLM
-    Replace with API call when deployed
-    """
-    return f"[AI FIX GENERATED] {prompt}"
-
-
-def debug_code(error):
-    print("🧠 AI Debugging triggered...")
-    fix = llm_fix(error)
-
-    with open("/root/ish-dev/DNA.md", "a") as f:
-        f.write(f"\nAI_FIX: {fix}\n")
-
-    return fix
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        print(ask_gemini(sys.argv[1]))
+    else:
+        print("🤖 Usage: python3 ai_debugger.py 'your error message'")
