@@ -1,0 +1,77 @@
+{
+  "successful_commands": [
+    {
+      "command": "cat > /root/ish-dev/core/menu.sh << 'MENUFINAL'",
+      "timestamp": "2026-05-01 05:25:39.098390",
+      "output": ""
+    },
+    {
+      "command": "#!/bin/sh",
+      "timestamp": "2026-05-01 05:25:39.124348",
+      "output": ""
+    },
+    {
+      "command": "clear",
+      "timestamp": "2026-05-01 05:25:39.178732",
+      "output": "\u001b[H\u001b[J"
+    },
+    {
+      "command": "echo \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"",
+      "timestamp": "2026-05-01 05:25:39.208321",
+      "output": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    },
+    {
+      "command": "echo \"\ud83d\udcf2 HOOPSTREET ISH-DEV IPHONE \ud83e\udd33 v10.0.7\"",
+      "timestamp": "2026-05-01 05:25:39.234915",
+      "output": "\ud83d\udcf2 HOOPSTREET ISH-DEV IPHONE \ud83e\udd33 v10.0.7\n"
+    },
+    {
+      "command": "echo \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"",
+      "timestamp": "2026-05-01 05:25:39.262207",
+      "output": "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+    },
+    {
+      "command": "echo \"\"",
+      "timestamp": "2026-05-01 05:25:39.289774",
+      "output": "\n"
+    },
+    {
+      "command": "echo \" \ud83d\udccb MAIN MENU\"",
+      "timestamp": "2026-05-01 05:25:39.317762",
+      "output": " \ud83d\udccb MAIN MENU\n"
+    },
+    {
+      "command": "echo \"\"",
+      "timestamp": "2026-05-01 05:25:39.346514",
+      "output": "\n"
+    },
+    {
+      "command": "echo \"1. \ud83e\udd16 Agent       - Self-Improving AI Agent\"",
+      "timestamp": "2026-05-01 05:25:39.377852",
+      "output": "1. \ud83e\udd16 Agent       - Self-Improving AI Agent\n"
+    }
+  ],
+  "failed_commands": [
+    {
+      "command": "while true; do",
+      "timestamp": "2026-05-01 05:25:39.149876",
+      "error": "/bin/sh: syntax error: unexpected end of file (expecting \"done\")\n"
+    }
+  ],
+  "learned_patterns": [
+    "self_upgrade_triggered"
+  ],
+  "self_upgrades": [
+    {
+      "timestamp": "2026-05-01 05:25:32.604680",
+      "version": "4.0",
+      "upgrade_number": 1
+    }
+  ],
+  "stats": {
+    "total_executions": 11,
+    "total_success": 10,
+    "total_failed": 1,
+    "self_heals": 0
+  }
+}

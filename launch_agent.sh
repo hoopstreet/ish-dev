@@ -1,7 +1,8 @@
 #!/bin/sh
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🤖 HOOPSTREET UNIFIED AI AGENT"
+echo "🤖 HOOPSTREET AI AGENT"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-python3 /root/ish-dev/core/agent_unified.py
+cd /root/ish-dev
+python3 core/agent_unified.py
