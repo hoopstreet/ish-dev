@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, time, subprocess, requests, glob
+import os, sys, json, time, subprocess, glob
 from datetime import datetime
 
 class IshOmniEvolution:
@@ -9,8 +9,7 @@ class IshOmniEvolution:
         self.recovery_dir = f"{self.root}/recovery"
         self.vault = {
             "gh_token": "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",
-            "repo_url": "https://hoopstreet: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@github.com/hoopstreet/ish-dev.git",
-            "gemini_keys": ["AIzaSyDHhh5zkL6NnEBD9SI-sLfl9Ur8yNA6PxA", "AIzaSyDpuZ5pFlQd0ezHxNJfoWHos_XiegAiV14", "AIzaSyA5BU2mk6o2HHJMq1pqydwFeJUpd36akHU"]
+            "repo_url": "https://hoopstreet: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@github.com/hoopstreet/ish-dev.git"
         }
 
     def shell(self, cmd):
@@ -18,59 +17,67 @@ class IshOmniEvolution:
 
     def log(self, action, status):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        os.makedirs(f"{self.root}/logs", exist_ok=True)
         with open(f"{self.root}/logs/evolution.log", "a") as l:
             l.write(f"[{ts}] v{self.version} | {action} | {status}\n")
 
-    def bootstrap_git(self):
+    def sync_remote(self):
+        """Pull from GitHub first to catch remote changes/duplicates."""
         if not os.path.exists(f"{self.root}/.git"):
             self.shell("git init")
-        self.shell(f"git remote remove origin 2>/dev/null")
-        self.shell(f"git remote add origin {self.vault['repo_url']}")
-        self.shell("git config --global user.email 'hoopstreet143@gmail.com' && git config --global user.name 'hoopstreet'")
+            self.shell(f"git remote add origin {self.vault['repo_url']}")
+        
+        # Fetch and merge remote changes
+        self.shell("git fetch --all")
+        res = self.shell("git merge origin/master -X theirs --allow-unrelated-histories")
+        self.log("REMOTE_SYNC", f"PULL/MERGE: {res}")
 
     def deep_recursive_adoption(self):
-        # Scan all recovery tarballs or folders for code blocks
+        """Adopts files from /recovery and resolves duplicates."""
         snapshots = glob.glob(f"{self.recovery_dir}/**/*", recursive=True)
         for snap in snapshots:
-            if os.path.isfile(snap) and snap.endswith(('.py', '.sh', '.md')):
+            if os.path.isfile(snap) and snap.endswith(('.py', '.sh', '.md', '.json')):
+                # Logic: If it exists in recovery but missing in core, move it.
+                # If duplicate, 'cp -u' only updates if recovery is newer.
                 target_path = snap.replace(self.recovery_dir, f"{self.root}/core")
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                # Analyze if target exists, if not, or if older, adopt it.
-                self.shell(f"cp -u {snap} {target_path}")
-        self.log("RECOVERY_ADOPTION", "SUCCESS - All versions merged to Core")
+                self.shell(f"cp -u '{snap}' '{target_path}'")
+        self.log("DNA_ADOPTION", "RECOVERY MERGED TO CORE")
 
-    def self_heal_and_upgrade(self):
-        # Fix permissions and missing headers for all v20 scripts
+    def self_heal(self):
+        """Fixes permissions and environment issues."""
         self.shell("chmod +x core/*.sh core/*.py 2>/dev/null")
-        self.shell("find . -name '*.py' -exec sed -i '1i #!/usr/bin/env python3' {} + 2>/dev/null")
-        self.log("INFRA_HEALING", "SUCCESS - Permissions & Shebangs restored")
+        self.log("SELF_HEAL", "INFRASTRUCTURE STABILIZED")
 
-    def auto_commit_push(self):
+    def auto_push(self):
+        """Commits all local merges/adoptions and pushes to GitHub."""
+        self.shell("git config user.email 'hoopstreet143@gmail.com'")
+        self.shell("git config user.name 'hoopstreet'")
         status = self.shell("git status --porcelain")
         if status:
             self.shell("git add .")
-            self.shell(f"git commit -m '🤖 [v20-OMNI] Auto-Evolution: Merge Recovery & Self-Heal'")
+            self.shell(f"git commit -m '🤖 [v20-OMNI] Auto-Pilot: Merge, Adopt & Evolution'")
             res = self.shell("git push origin master --force")
-            self.log("GITHUB_SYNC", f"PUSHED - {res}")
-        else:
-            self.log("GITHUB_SYNC", "SKIPPED - No changes detected")
+            self.log("GITHUB_PUSH", f"RESULT: {res}")
 
     def run_loop(self):
         while True:
             os.system('clear')
             print("═══════════════════════════════════════════════════════")
-            print(f"🧬 ISH-DEV OMNI-AGENT v{self.version} [AUTOPILOT]")
-            print("═══════════════════════════════════════════════════════")
-            print("⚡ STATUS: Active Exploration & Adoption...")
-            
-            self.bootstrap_git()
-            self.deep_recursive_adoption()
-            self.self_heal_and_upgrade()
-            self.auto_commit_push()
+            print(f"🧬 ISH-DEV OMNI-AGENT v{self.version} [FAST-AUTOPILOT]")
 
-            print("✅ CYCLE COMPLETE. Sleeping for 300s...")
+            print("═══════════════════════════════════════════════════════")
+            print(f"🕒 Last Run: {datetime.now().strftime('%I:%M:%S %p')}")
+            print("⚡ STATUS: Pulling Remote > Merging Recovery > Pushing Evolution...")
+            
+            self.sync_remote()
+            self.deep_recursive_adoption()
+            self.self_heal()
+            self.auto_push()
+
+            print("✅ CYCLE COMPLETE. Next run in 8 seconds...")
             print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            time.sleep(300) # Re-analyze every 5 minutes
+            time.sleep(8)
 
 if __name__ == "__main__":
     IshOmniEvolution().run_loop()
