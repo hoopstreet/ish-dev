@@ -1,0 +1,12 @@
+name: Omni-Evolution-24/7
+on:
+  push:
+  schedule:
+    - cron: '*/10 * * * *'
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Architect Build
+        run: python3 core/omni_architect.py --cloud

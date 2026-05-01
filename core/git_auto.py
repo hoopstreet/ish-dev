@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 #!/bin/sh
 
 cd /root/ish-dev

@@ -1,249 +1,267 @@
-from typing import Iterator, List, Optional, Tuple
+import sys
+from copy import deepcopy
 
-from ._loop import loop_first, loop_last
-from .console import Console, ConsoleOptions, RenderableType, RenderResult
-from .jupyter import JupyterMixin
-from .measure import Measurement
-from .segment import Segment
-from .style import Style, StyleStack, StyleType
-from .styled import Styled
+from typing import List, Callable, Iterator, Union, Optional, Generic, TypeVar, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .lexer import TerminalDef, Token
+    try:
+        import rich
+    except ImportError:
+        pass
+    from typing import Literal
+
+###{standalone
+
+class Meta:
+
+    empty: bool
+    line: int
+    column: int
+    start_pos: int
+    end_line: int
+    end_column: int
+    end_pos: int
+    orig_expansion: 'List[TerminalDef]'
+    match_tree: bool
+
+    def __init__(self):
+        self.empty = True
 
 
-class Tree(JupyterMixin):
-    """A renderable for a tree structure.
+_Leaf_T = TypeVar("_Leaf_T")
+Branch = Union[_Leaf_T, 'Tree[_Leaf_T]']
 
-    Args:
-        label (RenderableType): The renderable or str for the tree label.
-        style (StyleType, optional): Style of this tree. Defaults to "tree".
-        guide_style (StyleType, optional): Style of the guide lines. Defaults to "tree.line".
-        expanded (bool, optional): Also display children. Defaults to True.
-        highlight (bool, optional): Highlight renderable (if str). Defaults to False.
+
+class Tree(Generic[_Leaf_T]):
+    """The main tree class.
+
+    Creates a new tree, and stores "data" and "children" in attributes of the same name.
+    Trees can be hashed and compared.
+
+    Parameters:
+        data: The name of the rule or alias
+        children: List of matched sub-rules and terminals
+        meta: Line & Column numbers (if ``propagate_positions`` is enabled).
+            meta attributes: (line, column, end_line, end_column, start_pos, end_pos,
+                              container_line, container_column, container_end_line, container_end_column)
+            container_* attributes consider all symbols, including those that have been inlined in the tree.
+            For example, in the rule 'a: _A B _C', the regular attributes will mark the start and end of B,
+            but the container_* attributes will also include _A and _C in the range. However, rules that
+            contain 'a' will consider it in full, including _A and _C for all attributes.
     """
 
-    def __init__(
-        self,
-        label: RenderableType,
-        *,
-        style: StyleType = "tree",
-        guide_style: StyleType = "tree.line",
-        expanded: bool = True,
-        highlight: bool = False,
-        hide_root: bool = False,
-    ) -> None:
-        self.label = label
-        self.style = style
-        self.guide_style = guide_style
-        self.children: List[Tree] = []
-        self.expanded = expanded
-        self.highlight = highlight
-        self.hide_root = hide_root
+    data: str
+    children: 'List[Branch[_Leaf_T]]'
 
-    def add(
-        self,
-        label: RenderableType,
-        *,
-        style: Optional[StyleType] = None,
-        guide_style: Optional[StyleType] = None,
-        expanded: bool = True,
-        highlight: bool = False,
-    ) -> "Tree":
-        """Add a child tree.
+    def __init__(self, data: str, children: 'List[Branch[_Leaf_T]]', meta: Optional[Meta]=None) -> None:
+        self.data = data
+        self.children = children
+        self._meta = meta
 
-        Args:
-            label (RenderableType): The renderable or str for the tree label.
-            style (StyleType, optional): Style of this tree. Defaults to "tree".
-            guide_style (StyleType, optional): Style of the guide lines. Defaults to "tree.line".
-            expanded (bool, optional): Also display children. Defaults to True.
-            highlight (Optional[bool], optional): Highlight renderable (if str). Defaults to False.
+    @property
+    def meta(self) -> Meta:
+        if self._meta is None:
+            self._meta = Meta()
+        return self._meta
 
-        Returns:
-            Tree: A new child Tree, which may be further modified.
+    def __repr__(self):
+        return 'Tree(%r, %r)' % (self.data, self.children)
+
+    def _pretty_label(self):
+        return self.data
+
+    def _pretty(self, level, indent_str):
+        yield f'{indent_str*level}{self._pretty_label()}'
+        if len(self.children) == 1 and not isinstance(self.children[0], Tree):
+            yield f'\t{self.children[0]}\n'
+        else:
+            yield '\n'
+            for n in self.children:
+                if isinstance(n, Tree):
+                    yield from n._pretty(level+1, indent_str)
+                else:
+                    yield f'{indent_str*(level+1)}{n}\n'
+
+    def pretty(self, indent_str: str='  ') -> str:
+        """Returns an indented string representation of the tree.
+
+        Great for debugging.
         """
-        node = Tree(
-            label,
-            style=self.style if style is None else style,
-            guide_style=self.guide_style if guide_style is None else guide_style,
-            expanded=expanded,
-            highlight=self.highlight if highlight is None else highlight,
-        )
-        self.children.append(node)
+        return ''.join(self._pretty(0, indent_str))
+
+    def __rich__(self, parent:Optional['rich.tree.Tree']=None) -> 'rich.tree.Tree':
+        """Returns a tree widget for the 'rich' library.
+
+        Example:
+            ::
+                from rich import print
+                from lark import Tree
+
+                tree = Tree('root', ['node1', 'node2'])
+                print(tree)
+        """
+        return self._rich(parent)
+
+    def _rich(self, parent):
+        if parent:
+            tree = parent.add(f'[bold]{self.data}[/bold]')
+        else:
+            import rich.tree
+            tree = rich.tree.Tree(self.data)
+
+        for c in self.children:
+            if isinstance(c, Tree):
+                c._rich(tree)
+            else:
+                tree.add(f'[green]{c}[/green]')
+
+        return tree
+
+    def __eq__(self, other):
+        try:
+            return self.data == other.data and self.children == other.children
+        except AttributeError:
+            return False
+
+    def __ne__(self, other):
+        return not (self == other)
+
+    def __hash__(self) -> int:
+        return hash((self.data, tuple(self.children)))
+
+    def iter_subtrees(self) -> 'Iterator[Tree[_Leaf_T]]':
+        """Depth-first iteration.
+
+        Iterates over all the subtrees, never returning to the same node twice (Lark's parse-tree is actually a DAG).
+        """
+        queue = [self]
+        subtrees = dict()
+        for subtree in queue:
+            subtrees[id(subtree)] = subtree
+            queue += [c for c in reversed(subtree.children)
+                      if isinstance(c, Tree) and id(c) not in subtrees]
+
+        del queue
+        return reversed(list(subtrees.values()))
+
+    def iter_subtrees_topdown(self):
+        """Breadth-first iteration.
+
+        Iterates over all the subtrees, return nodes in order like pretty() does.
+        """
+        stack = [self]
+        stack_append = stack.append
+        stack_pop = stack.pop
+        while stack:
+            node = stack_pop()
+            if not isinstance(node, Tree):
+                continue
+            yield node
+            for child in reversed(node.children):
+                stack_append(child)
+
+    def find_pred(self, pred: 'Callable[[Tree[_Leaf_T]], bool]') -> 'Iterator[Tree[_Leaf_T]]':
+        """Returns all nodes of the tree that evaluate pred(node) as true."""
+        return filter(pred, self.iter_subtrees())
+
+    def find_data(self, data: str) -> 'Iterator[Tree[_Leaf_T]]':
+        """Returns all nodes of the tree whose data equals the given data."""
+        return self.find_pred(lambda t: t.data == data)
+
+###}
+
+    def expand_kids_by_data(self, *data_values):
+        """Expand (inline) children with any of the given data values. Returns True if anything changed"""
+        changed = False
+        for i in range(len(self.children)-1, -1, -1):
+            child = self.children[i]
+            if isinstance(child, Tree) and child.data in data_values:
+                self.children[i:i+1] = child.children
+                changed = True
+        return changed
+
+
+    def scan_values(self, pred: 'Callable[[Branch[_Leaf_T]], bool]') -> Iterator[_Leaf_T]:
+        """Return all values in the tree that evaluate pred(value) as true.
+
+        This can be used to find all the tokens in the tree.
+
+        Example:
+            >>> all_tokens = tree.scan_values(lambda v: isinstance(v, Token))
+        """
+        for c in self.children:
+            if isinstance(c, Tree):
+                for t in c.scan_values(pred):
+                    yield t
+            else:
+                if pred(c):
+                    yield c
+
+    def __deepcopy__(self, memo):
+        return type(self)(self.data, deepcopy(self.children, memo), meta=self._meta)
+
+    def copy(self) -> 'Tree[_Leaf_T]':
+        return type(self)(self.data, self.children)
+
+    def set(self, data: str, children: 'List[Branch[_Leaf_T]]') -> None:
+        self.data = data
+        self.children = children
+
+
+ParseTree = Tree['Token']
+
+
+class SlottedTree(Tree):
+    __slots__ = 'data', 'children', 'rule', '_meta'
+
+
+def pydot__tree_to_png(tree: Tree, filename: str, rankdir: 'Literal["TB", "LR", "BT", "RL"]'="LR", **kwargs) -> None:
+    graph = pydot__tree_to_graph(tree, rankdir, **kwargs)
+    graph.write_png(filename)
+
+
+def pydot__tree_to_dot(tree: Tree, filename, rankdir="LR", **kwargs):
+    graph = pydot__tree_to_graph(tree, rankdir, **kwargs)
+    graph.write(filename)
+
+
+def pydot__tree_to_graph(tree: Tree, rankdir="LR", **kwargs):
+    """Creates a colorful image that represents the tree (data+children, without meta)
+
+    Possible values for `rankdir` are "TB", "LR", "BT", "RL", corresponding to
+    directed graphs drawn from top to bottom, from left to right, from bottom to
+    top, and from right to left, respectively.
+
+    `kwargs` can be any graph attribute (e. g. `dpi=200`). For a list of
+    possible attributes, see https://www.graphviz.org/doc/info/attrs.html.
+    """
+
+    import pydot  # type: ignore[import-not-found]
+    graph = pydot.Dot(graph_type='digraph', rankdir=rankdir, **kwargs)
+
+    i = [0]
+
+    def new_leaf(leaf):
+        node = pydot.Node(i[0], label=repr(leaf))
+        i[0] += 1
+        graph.add_node(node)
         return node
 
-    def __rich_console__(
-        self, console: "Console", options: "ConsoleOptions"
-    ) -> "RenderResult":
+    def _to_pydot(subtree):
+        color = hash(subtree.data) & 0xffffff
+        color |= 0x808080
 
-        stack: List[Iterator[Tuple[bool, Tree]]] = []
-        pop = stack.pop
-        push = stack.append
-        new_line = Segment.line()
+        subnodes = [_to_pydot(child) if isinstance(child, Tree) else new_leaf(child)
+                    for child in subtree.children]
+        node = pydot.Node(i[0], style="filled", fillcolor="#%x" % color, label=subtree.data)
+        i[0] += 1
+        graph.add_node(node)
 
-        get_style = console.get_style
-        null_style = Style.null()
-        guide_style = get_style(self.guide_style, default="") or null_style
-        SPACE, CONTINUE, FORK, END = range(4)
+        for subnode in subnodes:
+            graph.add_edge(pydot.Edge(node, subnode))
 
-        ASCII_GUIDES = ("    ", "|   ", "+-- ", "`-- ")
-        TREE_GUIDES = [
-            ("    ", "│   ", "├── ", "└── "),
-            ("    ", "┃   ", "┣━━ ", "┗━━ "),
-            ("    ", "║   ", "╠══ ", "╚══ "),
-        ]
-        _Segment = Segment
+        return node
 
-        def make_guide(index: int, style: Style) -> Segment:
-            """Make a Segment for a level of the guide lines."""
-            if options.ascii_only:
-                line = ASCII_GUIDES[index]
-            else:
-                guide = 1 if style.bold else (2 if style.underline2 else 0)
-                line = TREE_GUIDES[0 if options.legacy_windows else guide][index]
-            return _Segment(line, style)
-
-        levels: List[Segment] = [make_guide(CONTINUE, guide_style)]
-        push(iter(loop_last([self])))
-
-        guide_style_stack = StyleStack(get_style(self.guide_style))
-        style_stack = StyleStack(get_style(self.style))
-        remove_guide_styles = Style(bold=False, underline2=False)
-
-        depth = 0
-
-        while stack:
-            stack_node = pop()
-            try:
-                last, node = next(stack_node)
-            except StopIteration:
-                levels.pop()
-                if levels:
-                    guide_style = levels[-1].style or null_style
-                    levels[-1] = make_guide(FORK, guide_style)
-                    guide_style_stack.pop()
-                    style_stack.pop()
-                continue
-            push(stack_node)
-            if last:
-                levels[-1] = make_guide(END, levels[-1].style or null_style)
-
-            guide_style = guide_style_stack.current + get_style(node.guide_style)
-            style = style_stack.current + get_style(node.style)
-            prefix = levels[(2 if self.hide_root else 1) :]
-            renderable_lines = console.render_lines(
-                Styled(node.label, style),
-                options.update(
-                    width=options.max_width
-                    - sum(level.cell_length for level in prefix),
-                    highlight=self.highlight,
-                    height=None,
-                ),
-            )
-
-            if not (depth == 0 and self.hide_root):
-                for first, line in loop_first(renderable_lines):
-                    if prefix:
-                        yield from _Segment.apply_style(
-                            prefix,
-                            style.background_style,
-                            post_style=remove_guide_styles,
-                        )
-                    yield from line
-                    yield new_line
-                    if first and prefix:
-                        prefix[-1] = make_guide(
-                            SPACE if last else CONTINUE, prefix[-1].style or null_style
-                        )
-
-            if node.expanded and node.children:
-                levels[-1] = make_guide(
-                    SPACE if last else CONTINUE, levels[-1].style or null_style
-                )
-                levels.append(
-                    make_guide(END if len(node.children) == 1 else FORK, guide_style)
-                )
-                style_stack.push(get_style(node.style))
-                guide_style_stack.push(get_style(node.guide_style))
-                push(iter(loop_last(node.children)))
-                depth += 1
-
-    def __rich_measure__(
-        self, console: "Console", options: "ConsoleOptions"
-    ) -> "Measurement":
-        stack: List[Iterator[Tree]] = [iter([self])]
-        pop = stack.pop
-        push = stack.append
-        minimum = 0
-        maximum = 0
-        measure = Measurement.get
-        level = 0
-        while stack:
-            iter_tree = pop()
-            try:
-                tree = next(iter_tree)
-            except StopIteration:
-                level -= 1
-                continue
-            push(iter_tree)
-            min_measure, max_measure = measure(console, options, tree.label)
-            indent = level * 4
-            minimum = max(min_measure + indent, minimum)
-            maximum = max(max_measure + indent, maximum)
-            if tree.expanded and tree.children:
-                push(iter(tree.children))
-                level += 1
-        return Measurement(minimum, maximum)
-
-
-if __name__ == "__main__":  # pragma: no cover
-
-    from pip._vendor.rich.console import Group
-    from pip._vendor.rich.markdown import Markdown
-    from pip._vendor.rich.panel import Panel
-    from pip._vendor.rich.syntax import Syntax
-    from pip._vendor.rich.table import Table
-
-    table = Table(row_styles=["", "dim"])
-
-    table.add_column("Released", style="cyan", no_wrap=True)
-    table.add_column("Title", style="magenta")
-    table.add_column("Box Office", justify="right", style="green")
-
-    table.add_row("Dec 20, 2019", "Star Wars: The Rise of Skywalker", "$952,110,690")
-    table.add_row("May 25, 2018", "Solo: A Star Wars Story", "$393,151,347")
-    table.add_row("Dec 15, 2017", "Star Wars Ep. V111: The Last Jedi", "$1,332,539,889")
-    table.add_row("Dec 16, 2016", "Rogue One: A Star Wars Story", "$1,332,439,889")
-
-    code = """\
-class Segment(NamedTuple):
-    text: str = ""    
-    style: Optional[Style] = None    
-    is_control: bool = False    
-"""
-    syntax = Syntax(code, "python", theme="monokai", line_numbers=True)
-
-    markdown = Markdown(
-        """\
-### example.md
-> Hello, World!
-> 
-> Markdown _all_ the things
-"""
-    )
-
-    root = Tree("🌲 [b green]Rich Tree", highlight=True, hide_root=True)
-
-    node = root.add(":file_folder: Renderables", guide_style="red")
-    simple_node = node.add(":file_folder: [bold yellow]Atomic", guide_style="uu green")
-    simple_node.add(Group("📄 Syntax", syntax))
-    simple_node.add(Group("📄 Markdown", Panel(markdown, border_style="green")))
-
-    containers_node = node.add(
-        ":file_folder: [bold magenta]Containers", guide_style="bold magenta"
-    )
-    containers_node.expanded = True
-    panel = Panel.fit("Just a panel", border_style="red")
-    containers_node.add(Group("📄 Panels", panel))
-
-    containers_node.add(Group("📄 [b magenta]Table", table))
-
-    console = Console()
-    console.print(root)
+    _to_pydot(tree)
+    return graph

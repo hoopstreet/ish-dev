@@ -5,11 +5,11 @@ echo "════════════════════════�
 echo ""
 echo "Installing Hoopstreet System..."
 
-mkdir -p /root/ish-dev/core
-cp -r agent/* /root/ish-dev/core/
-chmod +x /root/ish-dev/core/*.sh 2>/dev/null
-chmod +x /root/ish-dev/core/*.py 2>/dev/null
-ln -sf /root/ish-dev/core/menu.sh /root/menu
+mkdir -p /root/hoopstreet
+cp -r agent/* /root/hoopstreet/
+chmod +x /root/hoopstreet/*.sh 2>/dev/null
+chmod +x /root/hoopstreet/*.py 2>/dev/null
+ln -sf /root/hoopstreet/menu.sh /root/menu
 
 echo ""
 echo "✅ Installation complete!"

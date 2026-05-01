@@ -1,107 +1,111 @@
-from __future__ import absolute_import
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing,
+#  software distributed under the License is distributed on an
+#  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+#  KIND, either express or implied.  See the License for the
+#  specific language governing permissions and limitations
+#  under the License.
+from json import JSONDecodeError
+from typing import Dict, Literal, Optional, Type
 
-from email.errors import MultipartInvariantViolationDefect, StartBoundaryNotFoundDefect
+from pydantic import Field, ValidationError
+from requests import HTTPError
 
-from ..exceptions import HeaderParsingError
-from ..packages.six.moves import http_client as httplib
+from pyiceberg.exceptions import (
+    AuthorizationExpiredError,
+    BadRequestError,
+    ForbiddenError,
+    OAuthError,
+    RESTError,
+    ServerError,
+    ServiceUnavailableError,
+    UnauthorizedError,
+)
+from pyiceberg.typedef import IcebergBaseModel
 
 
-def is_fp_closed(obj):
-    """
-    Checks whether a given file-like object is closed.
+class TokenResponse(IcebergBaseModel):
+    access_token: str = Field()
+    token_type: str = Field()
+    expires_in: Optional[int] = Field(default=None)
+    issued_token_type: Optional[str] = Field(default=None)
+    refresh_token: Optional[str] = Field(default=None)
+    scope: Optional[str] = Field(default=None)
 
-    :param obj:
-        The file-like object to check.
-    """
+
+class ErrorResponseMessage(IcebergBaseModel):
+    message: str = Field()
+    type: str = Field()
+    code: int = Field()
+
+
+class ErrorResponse(IcebergBaseModel):
+    error: ErrorResponseMessage = Field()
+
+
+class OAuthErrorResponse(IcebergBaseModel):
+    error: Literal[
+        "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type", "invalid_scope"
+    ]
+    error_description: Optional[str] = None
+    error_uri: Optional[str] = None
+
+
+def _handle_non_200_response(exc: HTTPError, error_handler: Dict[int, Type[Exception]]) -> None:
+    exception: Type[Exception]
+
+    if exc.response is None:
+        raise ValueError("Did not receive a response")
+
+    code = exc.response.status_code
+    if code in error_handler:
+        exception = error_handler[code]
+    elif code == 400:
+        exception = BadRequestError
+    elif code == 401:
+        exception = UnauthorizedError
+    elif code == 403:
+        exception = ForbiddenError
+    elif code == 422:
+        exception = RESTError
+    elif code == 419:
+        exception = AuthorizationExpiredError
+    elif code == 501:
+        exception = NotImplementedError
+    elif code == 503:
+        exception = ServiceUnavailableError
+    elif 500 <= code < 600:
+        exception = ServerError
+    else:
+        exception = RESTError
 
     try:
-        # Check `isclosed()` first, in case Python3 doesn't set `closed`.
-        # GH Issue #928
-        return obj.isclosed()
-    except AttributeError:
-        pass
+        if exception == OAuthError:
+            # The OAuthErrorResponse has a different format
+            error = OAuthErrorResponse.model_validate_json(exc.response.text)
+            response = str(error.error)
+            if description := error.error_description:
+                response += f": {description}"
+            if uri := error.error_uri:
+                response += f" ({uri})"
+        else:
+            error = ErrorResponse.model_validate_json(exc.response.text).error
+            response = f"{error.type}: {error.message}"
+    except JSONDecodeError:
+        # In the case we don't have a proper response
+        response = f"RESTError {exc.response.status_code}: Could not decode json payload: {exc.response.text}"
+    except ValidationError as e:
+        # In the case we don't have a proper response
+        errs = ", ".join(err["msg"] for err in e.errors())
+        response = f"RESTError {exc.response.status_code}: Received unexpected JSON Payload: {exc.response.text}, errors: {errs}"
 
-    try:
-        # Check via the official file-like-object way.
-        return obj.closed
-    except AttributeError:
-        pass
-
-    try:
-        # Check if the object is a container for another file-like object that
-        # gets released on exhaustion (e.g. HTTPResponse).
-        return obj.fp is None
-    except AttributeError:
-        pass
-
-    raise ValueError("Unable to determine whether fp is closed.")
-
-
-def assert_header_parsing(headers):
-    """
-    Asserts whether all headers have been successfully parsed.
-    Extracts encountered errors from the result of parsing headers.
-
-    Only works on Python 3.
-
-    :param http.client.HTTPMessage headers: Headers to verify.
-
-    :raises urllib3.exceptions.HeaderParsingError:
-        If parsing errors are found.
-    """
-
-    # This will fail silently if we pass in the wrong kind of parameter.
-    # To make debugging easier add an explicit check.
-    if not isinstance(headers, httplib.HTTPMessage):
-        raise TypeError("expected httplib.Message, got {0}.".format(type(headers)))
-
-    defects = getattr(headers, "defects", None)
-    get_payload = getattr(headers, "get_payload", None)
-
-    unparsed_data = None
-    if get_payload:
-        # get_payload is actually email.message.Message.get_payload;
-        # we're only interested in the result if it's not a multipart message
-        if not headers.is_multipart():
-            payload = get_payload()
-
-            if isinstance(payload, (bytes, str)):
-                unparsed_data = payload
-    if defects:
-        # httplib is assuming a response body is available
-        # when parsing headers even when httplib only sends
-        # header data to parse_headers() This results in
-        # defects on multipart responses in particular.
-        # See: https://github.com/urllib3/urllib3/issues/800
-
-        # So we ignore the following defects:
-        # - StartBoundaryNotFoundDefect:
-        #     The claimed start boundary was never found.
-        # - MultipartInvariantViolationDefect:
-        #     A message claimed to be a multipart but no subparts were found.
-        defects = [
-            defect
-            for defect in defects
-            if not isinstance(
-                defect, (StartBoundaryNotFoundDefect, MultipartInvariantViolationDefect)
-            )
-        ]
-
-    if defects or unparsed_data:
-        raise HeaderParsingError(defects=defects, unparsed_data=unparsed_data)
-
-
-def is_response_to_head(response):
-    """
-    Checks whether the request of a response has been a HEAD-request.
-    Handles the quirks of AppEngine.
-
-    :param http.client.HTTPResponse response:
-        Response to check if the originating request
-        used 'HEAD' as a method.
-    """
-    # FIXME: Can we do this somehow without accessing private httplib _method?
-    method = response._method
-    if isinstance(method, int):  # Platform-specific: Appengine
-        return method == 3
-    return method.upper() == "HEAD"
+    raise exception(response) from exc

@@ -1,305 +1,328 @@
-# -*- coding: utf-8 -*-
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-"""
-requests.auth
-~~~~~~~~~~~~~
-
-This module contains the authentication handlers for Requests.
-"""
-
-import os
-import re
-import time
-import hashlib
+import base64
+import importlib
+import logging
 import threading
-import warnings
+import time
+from abc import ABC, abstractmethod
+from functools import cached_property
+from typing import Any, Dict, List, Optional, Type
 
-from base64 import b64encode
+import requests
+from requests import HTTPError, PreparedRequest, Session
+from requests.auth import AuthBase
 
-from .compat import urlparse, str, basestring
-from .cookies import extract_cookies_to_jar
-from ._internal_utils import to_native_string
-from .utils import parse_dict_header
+from pyiceberg.catalog.rest.response import TokenResponse, _handle_non_200_response
+from pyiceberg.exceptions import OAuthError
 
-CONTENT_TYPE_FORM_URLENCODED = 'application/x-www-form-urlencoded'
-CONTENT_TYPE_MULTI_PART = 'multipart/form-data'
+COLON = ":"
+logger = logging.getLogger(__name__)
 
 
-def _basic_auth_str(username, password):
-    """Returns a Basic Auth string."""
+class AuthManager(ABC):
+    """
+    Abstract base class for Authentication Managers used to supply authorization headers to HTTP clients (e.g. requests.Session).
 
-    # "I want us to put a big-ol' comment on top of it that
-    # says that this behaviour is dumb but we need to preserve
-    # it because people are relying on it."
-    #    - Lukasa
-    #
-    # These are here solely to maintain backwards compatibility
-    # for things like ints. This will be removed in 3.0.0.
-    if not isinstance(username, basestring):
-        warnings.warn(
-            "Non-string usernames will no longer be supported in Requests "
-            "3.0.0. Please convert the object you've passed in ({!r}) to "
-            "a string or bytes object in the near future to avoid "
-            "problems.".format(username),
-            category=DeprecationWarning,
+    Subclasses must implement the `auth_header` method to return an Authorization header value.
+    """
+
+    @abstractmethod
+    def auth_header(self) -> Optional[str]:
+        """Return the Authorization header value, or None if not applicable."""
+
+
+class NoopAuthManager(AuthManager):
+    """Auth Manager implementation with no auth."""
+
+    def auth_header(self) -> Optional[str]:
+        return None
+
+
+class BasicAuthManager(AuthManager):
+    """AuthManager implementation that supports basic password auth."""
+
+    def __init__(self, username: str, password: str):
+        credentials = f"{username}:{password}"
+        self._token = base64.b64encode(credentials.encode()).decode()
+
+    def auth_header(self) -> str:
+        return f"Basic {self._token}"
+
+
+class LegacyOAuth2AuthManager(AuthManager):
+    """Legacy OAuth2 AuthManager implementation.
+
+    This class exists for backward compatibility, and will be removed in
+    PyIceberg 1.0.0 in favor of OAuth2AuthManager.
+    """
+
+    _session: Session
+    _auth_url: Optional[str]
+    _token: Optional[str]
+    _credential: Optional[str]
+    _optional_oauth_params: Optional[Dict[str, str]]
+
+    def __init__(
+        self,
+        session: Session,
+        auth_url: Optional[str] = None,
+        credential: Optional[str] = None,
+        initial_token: Optional[str] = None,
+        optional_oauth_params: Optional[Dict[str, str]] = None,
+    ):
+        self._session = session
+        self._auth_url = auth_url
+        self._token = initial_token
+        self._credential = credential
+        self._optional_oauth_params = optional_oauth_params
+        self._refresh_token()
+
+    def _fetch_access_token(self, credential: str) -> str:
+        if COLON in credential:
+            client_id, client_secret = credential.split(COLON)
+        else:
+            client_id, client_secret = None, credential
+
+        data = {"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret}
+
+        if self._optional_oauth_params:
+            data.update(self._optional_oauth_params)
+
+        if self._auth_url is None:
+            raise ValueError("Cannot fetch access token from undefined auth_url")
+
+        response = self._session.post(
+            url=self._auth_url, data=data, headers={**self._session.headers, "Content-type": "application/x-www-form-urlencoded"}
         )
-        username = str(username)
-
-    if not isinstance(password, basestring):
-        warnings.warn(
-            "Non-string passwords will no longer be supported in Requests "
-            "3.0.0. Please convert the object you've passed in ({!r}) to "
-            "a string or bytes object in the near future to avoid "
-            "problems.".format(type(password)),
-            category=DeprecationWarning,
-        )
-        password = str(password)
-    # -- End Removal --
-
-    if isinstance(username, str):
-        username = username.encode('latin1')
-
-    if isinstance(password, str):
-        password = password.encode('latin1')
-
-    authstr = 'Basic ' + to_native_string(
-        b64encode(b':'.join((username, password))).strip()
-    )
-
-    return authstr
-
-
-class AuthBase(object):
-    """Base class that all auth implementations derive from"""
-
-    def __call__(self, r):
-        raise NotImplementedError('Auth hooks must be callable.')
-
-
-class HTTPBasicAuth(AuthBase):
-    """Attaches HTTP Basic Authentication to the given Request object."""
-
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
-
-    def __eq__(self, other):
-        return all([
-            self.username == getattr(other, 'username', None),
-            self.password == getattr(other, 'password', None)
-        ])
-
-    def __ne__(self, other):
-        return not self == other
-
-    def __call__(self, r):
-        r.headers['Authorization'] = _basic_auth_str(self.username, self.password)
-        return r
-
-
-class HTTPProxyAuth(HTTPBasicAuth):
-    """Attaches HTTP Proxy Authentication to a given Request object."""
-
-    def __call__(self, r):
-        r.headers['Proxy-Authorization'] = _basic_auth_str(self.username, self.password)
-        return r
-
-
-class HTTPDigestAuth(AuthBase):
-    """Attaches HTTP Digest Authentication to the given Request object."""
-
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
-        # Keep state in per-thread local storage
-        self._thread_local = threading.local()
-
-    def init_per_thread_state(self):
-        # Ensure state is initialized just once per-thread
-        if not hasattr(self._thread_local, 'init'):
-            self._thread_local.init = True
-            self._thread_local.last_nonce = ''
-            self._thread_local.nonce_count = 0
-            self._thread_local.chal = {}
-            self._thread_local.pos = None
-            self._thread_local.num_401_calls = None
-
-    def build_digest_header(self, method, url):
-        """
-        :rtype: str
-        """
-
-        realm = self._thread_local.chal['realm']
-        nonce = self._thread_local.chal['nonce']
-        qop = self._thread_local.chal.get('qop')
-        algorithm = self._thread_local.chal.get('algorithm')
-        opaque = self._thread_local.chal.get('opaque')
-        hash_utf8 = None
-
-        if algorithm is None:
-            _algorithm = 'MD5'
-        else:
-            _algorithm = algorithm.upper()
-        # lambdas assume digest modules are imported at the top level
-        if _algorithm == 'MD5' or _algorithm == 'MD5-SESS':
-            def md5_utf8(x):
-                if isinstance(x, str):
-                    x = x.encode('utf-8')
-                return hashlib.md5(x).hexdigest()
-            hash_utf8 = md5_utf8
-        elif _algorithm == 'SHA':
-            def sha_utf8(x):
-                if isinstance(x, str):
-                    x = x.encode('utf-8')
-                return hashlib.sha1(x).hexdigest()
-            hash_utf8 = sha_utf8
-        elif _algorithm == 'SHA-256':
-            def sha256_utf8(x):
-                if isinstance(x, str):
-                    x = x.encode('utf-8')
-                return hashlib.sha256(x).hexdigest()
-            hash_utf8 = sha256_utf8
-        elif _algorithm == 'SHA-512':
-            def sha512_utf8(x):
-                if isinstance(x, str):
-                    x = x.encode('utf-8')
-                return hashlib.sha512(x).hexdigest()
-            hash_utf8 = sha512_utf8
-
-        KD = lambda s, d: hash_utf8("%s:%s" % (s, d))
-
-        if hash_utf8 is None:
-            return None
-
-        # XXX not implemented yet
-        entdig = None
-        p_parsed = urlparse(url)
-        #: path is request-uri defined in RFC 2616 which should not be empty
-        path = p_parsed.path or "/"
-        if p_parsed.query:
-            path += '?' + p_parsed.query
-
-        A1 = '%s:%s:%s' % (self.username, realm, self.password)
-        A2 = '%s:%s' % (method, path)
-
-        HA1 = hash_utf8(A1)
-        HA2 = hash_utf8(A2)
-
-        if nonce == self._thread_local.last_nonce:
-            self._thread_local.nonce_count += 1
-        else:
-            self._thread_local.nonce_count = 1
-        ncvalue = '%08x' % self._thread_local.nonce_count
-        s = str(self._thread_local.nonce_count).encode('utf-8')
-        s += nonce.encode('utf-8')
-        s += time.ctime().encode('utf-8')
-        s += os.urandom(8)
-
-        cnonce = (hashlib.sha1(s).hexdigest()[:16])
-        if _algorithm == 'MD5-SESS':
-            HA1 = hash_utf8('%s:%s:%s' % (HA1, nonce, cnonce))
-
-        if not qop:
-            respdig = KD(HA1, "%s:%s" % (nonce, HA2))
-        elif qop == 'auth' or 'auth' in qop.split(','):
-            noncebit = "%s:%s:%s:%s:%s" % (
-                nonce, ncvalue, cnonce, 'auth', HA2
-            )
-            respdig = KD(HA1, noncebit)
-        else:
-            # XXX handle auth-int.
-            return None
-
-        self._thread_local.last_nonce = nonce
-
-        # XXX should the partial digests be encoded too?
-        base = 'username="%s", realm="%s", nonce="%s", uri="%s", ' \
-               'response="%s"' % (self.username, realm, nonce, path, respdig)
-        if opaque:
-            base += ', opaque="%s"' % opaque
-        if algorithm:
-            base += ', algorithm="%s"' % algorithm
-        if entdig:
-            base += ', digest="%s"' % entdig
-        if qop:
-            base += ', qop="auth", nc=%s, cnonce="%s"' % (ncvalue, cnonce)
-
-        return 'Digest %s' % (base)
-
-    def handle_redirect(self, r, **kwargs):
-        """Reset num_401_calls counter on redirects."""
-        if r.is_redirect:
-            self._thread_local.num_401_calls = 1
-
-    def handle_401(self, r, **kwargs):
-        """
-        Takes the given response and tries digest-auth, if needed.
-
-        :rtype: requests.Response
-        """
-
-        # If response is not 4xx, do not auth
-        # See https://github.com/psf/requests/issues/3772
-        if not 400 <= r.status_code < 500:
-            self._thread_local.num_401_calls = 1
-            return r
-
-        if self._thread_local.pos is not None:
-            # Rewind the file position indicator of the body to where
-            # it was to resend the request.
-            r.request.body.seek(self._thread_local.pos)
-        s_auth = r.headers.get('www-authenticate', '')
-
-        if 'digest' in s_auth.lower() and self._thread_local.num_401_calls < 2:
-
-            self._thread_local.num_401_calls += 1
-            pat = re.compile(r'digest ', flags=re.IGNORECASE)
-            self._thread_local.chal = parse_dict_header(pat.sub('', s_auth, count=1))
-
-            # Consume content and release the original connection
-            # to allow our new request to reuse the same one.
-            r.content
-            r.close()
-            prep = r.request.copy()
-            extract_cookies_to_jar(prep._cookies, r.request, r.raw)
-            prep.prepare_cookies(prep._cookies)
-
-            prep.headers['Authorization'] = self.build_digest_header(
-                prep.method, prep.url)
-            _r = r.connection.send(prep, **kwargs)
-            _r.history.append(r)
-            _r.request = prep
-
-            return _r
-
-        self._thread_local.num_401_calls = 1
-        return r
-
-    def __call__(self, r):
-        # Initialize per-thread state, if needed
-        self.init_per_thread_state()
-        # If we have a saved nonce, skip the 401
-        if self._thread_local.last_nonce:
-            r.headers['Authorization'] = self.build_digest_header(r.method, r.url)
         try:
-            self._thread_local.pos = r.body.tell()
-        except AttributeError:
-            # In the case of HTTPDigestAuth being reused and the body of
-            # the previous request was a file-like object, pos has the
-            # file position of the previous body. Ensure it's set to
-            # None.
-            self._thread_local.pos = None
-        r.register_hook('response', self.handle_401)
-        r.register_hook('response', self.handle_redirect)
-        self._thread_local.num_401_calls = 1
+            response.raise_for_status()
+        except HTTPError as exc:
+            _handle_non_200_response(exc, {400: OAuthError, 401: OAuthError})
 
-        return r
+        return TokenResponse.model_validate_json(response.text).access_token
 
-    def __eq__(self, other):
-        return all([
-            self.username == getattr(other, 'username', None),
-            self.password == getattr(other, 'password', None)
-        ])
+    def _refresh_token(self) -> None:
+        if self._credential is not None:
+            self._token = self._fetch_access_token(self._credential)
 
-    def __ne__(self, other):
-        return not self == other
+    def auth_header(self) -> str:
+        return f"Bearer {self._token}"
+
+
+class OAuth2TokenProvider:
+    """Thread-safe OAuth2 token provider with token refresh support."""
+
+    client_id: str
+    client_secret: str
+    token_url: str
+    scope: Optional[str]
+    refresh_margin: int
+    expires_in: Optional[int]
+
+    _token: Optional[str]
+    _expires_at: int
+    _lock: threading.Lock
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        token_url: str,
+        scope: Optional[str] = None,
+        refresh_margin: int = 60,
+        expires_in: Optional[int] = None,
+    ):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token_url = token_url
+        self.scope = scope
+        self.refresh_margin = refresh_margin
+        self.expires_in = expires_in
+
+        self._token = None
+        self._expires_at = 0
+        self._lock = threading.Lock()
+
+    @cached_property
+    def _client_secret_header(self) -> str:
+        creds = f"{self.client_id}:{self.client_secret}"
+        creds_bytes = creds.encode("utf-8")
+        b64_creds = base64.b64encode(creds_bytes).decode("utf-8")
+        return f"Basic {b64_creds}"
+
+    def _refresh_token(self) -> None:
+        data = {"grant_type": "client_credentials"}
+        if self.scope:
+            data["scope"] = self.scope
+
+        response = requests.post(self.token_url, data=data, headers={"Authorization": self._client_secret_header})
+        response.raise_for_status()
+        result = response.json()
+
+        self._token = result["access_token"]
+        expires_in = result.get("expires_in", self.expires_in)
+        if expires_in is None:
+            raise ValueError(
+                "The expiration time of the Token must be provided by the Server in the Access Token Response in `expires_in` field, or by the PyIceberg Client."
+            )
+        self._expires_at = time.monotonic() + expires_in - self.refresh_margin
+
+    def get_token(self) -> str:
+        with self._lock:
+            if not self._token or time.monotonic() >= self._expires_at:
+                self._refresh_token()
+            if self._token is None:
+                raise ValueError("Authorization token is None after refresh")
+            return self._token
+
+
+class OAuth2AuthManager(AuthManager):
+    """Auth Manager implementation that supports OAuth2 as defined in IETF RFC6749."""
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        token_url: str,
+        scope: Optional[str] = None,
+        refresh_margin: int = 60,
+        expires_in: Optional[int] = None,
+    ):
+        self.token_provider = OAuth2TokenProvider(
+            client_id,
+            client_secret,
+            token_url,
+            scope,
+            refresh_margin,
+            expires_in,
+        )
+
+    def auth_header(self) -> str:
+        return f"Bearer {self.token_provider.get_token()}"
+
+
+class GoogleAuthManager(AuthManager):
+    """An auth manager that is responsible for handling Google credentials."""
+
+    def __init__(self, credentials_path: Optional[str] = None, scopes: Optional[List[str]] = None):
+        """
+        Initialize GoogleAuthManager.
+
+        Args:
+            credentials_path: Optional path to Google credentials JSON file.
+            scopes: Optional list of OAuth2 scopes.
+        """
+        try:
+            import google.auth
+            import google.auth.transport.requests
+        except ImportError as e:
+            raise ImportError("Google Auth libraries not found. Please install 'google-auth'.") from e
+
+        if credentials_path:
+            self.credentials, _ = google.auth.load_credentials_from_file(credentials_path, scopes=scopes)
+        else:
+            logger.info("Using Google Default Application Credentials")
+            self.credentials, _ = google.auth.default(scopes=scopes)
+        self._auth_request = google.auth.transport.requests.Request()
+
+    def auth_header(self) -> str:
+        self.credentials.refresh(self._auth_request)
+        return f"Bearer {self.credentials.token}"
+
+
+class AuthManagerAdapter(AuthBase):
+    """A `requests.auth.AuthBase` adapter that integrates an `AuthManager` into a `requests.Session` to automatically attach the appropriate Authorization header to every request.
+
+    This adapter is useful when working with `requests.Session.auth`
+    and allows reuse of authentication strategies defined by `AuthManager`.
+    This AuthManagerAdapter is only intended to be used against the REST Catalog
+    Server that expects the Authorization Header.
+    """
+
+    def __init__(self, auth_manager: AuthManager):
+        """
+        Initialize AuthManagerAdapter.
+
+        Args:
+            auth_manager (AuthManager): An instance of an AuthManager subclass.
+        """
+        self.auth_manager = auth_manager
+
+    def __call__(self, request: PreparedRequest) -> PreparedRequest:
+        """
+        Modify the outgoing request to include the Authorization header.
+
+        Args:
+            request (requests.PreparedRequest): The HTTP request being prepared.
+
+        Returns:
+            requests.PreparedRequest: The modified request with Authorization header.
+        """
+        if auth_header := self.auth_manager.auth_header():
+            request.headers["Authorization"] = auth_header
+        return request
+
+
+class AuthManagerFactory:
+    _registry: Dict[str, Type["AuthManager"]] = {}
+
+    @classmethod
+    def register(cls, name: str, auth_manager_class: Type["AuthManager"]) -> None:
+        """
+        Register a string name to a known AuthManager class.
+
+        Args:
+            name (str): unique name like 'oauth2' to register the AuthManager with
+            auth_manager_class (Type["AuthManager"]): Implementation of AuthManager
+
+        Returns:
+            None
+        """
+        cls._registry[name] = auth_manager_class
+
+    @classmethod
+    def create(cls, class_or_name: str, config: Dict[str, Any]) -> AuthManager:
+        """
+        Create an AuthManager by name or fully-qualified class path.
+
+        Args:
+            class_or_name (str): Either a name like 'oauth2' or a full class path like 'my.module.CustomAuthManager'
+            config (Dict[str, Any]): Configuration passed to the AuthManager constructor
+
+        Returns:
+            AuthManager: An instantiated AuthManager subclass
+        """
+        if class_or_name in cls._registry:
+            manager_cls = cls._registry[class_or_name]
+        else:
+            try:
+                module_path, class_name = class_or_name.rsplit(".", 1)
+                module = importlib.import_module(module_path)
+                manager_cls = getattr(module, class_name)
+            except Exception as err:
+                raise ValueError(f"Could not load AuthManager class for '{class_or_name}'") from err
+
+        return manager_cls(**config)
+
+
+AuthManagerFactory.register("noop", NoopAuthManager)
+AuthManagerFactory.register("basic", BasicAuthManager)
+AuthManagerFactory.register("legacyoauth2", LegacyOAuth2AuthManager)
+AuthManagerFactory.register("oauth2", OAuth2AuthManager)
+AuthManagerFactory.register("google", GoogleAuthManager)

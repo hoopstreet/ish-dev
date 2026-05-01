@@ -1,288 +1,226 @@
-import functools
-import logging
-import os
+from __future__ import annotations
+
 import posixpath
 import re
-import urllib.parse
-from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Tuple, Union
+import urllib.parse as urlparse
 
-from pip._internal.utils.filetypes import WHEEL_EXTENSION
-from pip._internal.utils.hashes import Hashes
-from pip._internal.utils.misc import (
-    redact_auth_from_url,
-    split_auth_from_netloc,
-    splitext,
-)
-from pip._internal.utils.models import KeyBasedCompareMixin
-from pip._internal.utils.urls import path_to_url, url_to_path
+from functools import cached_property
+from typing import TYPE_CHECKING
+
+from poetry.core.packages.utils.utils import path_to_url
+from poetry.core.packages.utils.utils import splitext
+
 
 if TYPE_CHECKING:
-    from pip._internal.index.collector import HTMLPage
-
-logger = logging.getLogger(__name__)
+    from collections.abc import Mapping
 
 
-_SUPPORTED_HASHES = ("sha1", "sha224", "sha384", "sha256", "sha512", "md5")
-
-
-class Link(KeyBasedCompareMixin):
-    """Represents a parsed link from a Package Index's simple URL"""
-
-    __slots__ = [
-        "_parsed_url",
-        "_url",
-        "comes_from",
-        "requires_python",
-        "yanked_reason",
-        "cache_link_parsing",
-    ]
-
+class Link:
     def __init__(
         self,
         url: str,
-        comes_from: Optional[Union[str, "HTMLPage"]] = None,
-        requires_python: Optional[str] = None,
-        yanked_reason: Optional[str] = None,
-        cache_link_parsing: bool = True,
+        *,
+        requires_python: str | None = None,
+        hashes: Mapping[str, str] | None = None,
+        metadata: str | bool | dict[str, str] | None = None,
+        yanked: str | bool = False,
     ) -> None:
         """
-        :param url: url of the resource pointed to (href of the link)
-        :param comes_from: instance of HTMLPage where the link was found,
-            or string.
-        :param requires_python: String containing the `Requires-Python`
-            metadata field, specified in PEP 345. This may be specified by
-            a data-requires-python attribute in the HTML link tag, as
-            described in PEP 503.
-        :param yanked_reason: the reason the file has been yanked, if the
-            file has been yanked, or None if the file hasn't been yanked.
-            This is the value of the "data-yanked" attribute, if present, in
-            a simple repository HTML link. If the file has been yanked but
-            no reason was provided, this should be the empty string. See
-            PEP 592 for more information and the specification.
-        :param cache_link_parsing: A flag that is used elsewhere to determine
-                                   whether resources retrieved from this link
-                                   should be cached. PyPI index urls should
-                                   generally have this set to False, for
-                                   example.
+        Object representing a parsed link from https://pypi.python.org/simple/*
+
+        url:
+            url of the resource pointed to (href of the link)
+        requires_python:
+            String containing the `Requires-Python` metadata field, specified
+            in PEP 345. This may be specified by a data-requires-python
+            attribute in the HTML link tag, as described in PEP 503.
+        hashes:
+            A dictionary of hash names and associated hashes of the file.
+            Only relevant for JSON-API (PEP 691).
+        metadata:
+            One of:
+            - bool indicating that metadata is available
+            - string of the syntax `<hashname>=<hashvalue>` representing the hash
+              of the Core Metadata file according to PEP 658 (HTML).
+            - dict with hash names and associated hashes of the Core Metadata file
+              according to PEP 691 (JSON).
+        yanked:
+            False, if the data-yanked attribute is not present.
+            A string, if the data-yanked attribute has a string value.
+            True, if the data-yanked attribute is present but has no value.
+            According to PEP 592.
         """
 
         # url can be a UNC windows share
         if url.startswith("\\\\"):
             url = path_to_url(url)
 
-        self._parsed_url = urllib.parse.urlsplit(url)
-        # Store the url as a private attribute to prevent accidentally
-        # trying to set a new value.
-        self._url = url
-
-        self.comes_from = comes_from
+        self.url = url
         self.requires_python = requires_python if requires_python else None
-        self.yanked_reason = yanked_reason
+        self._hashes = hashes
 
-        super().__init__(key=url, defining_class=Link)
+        if isinstance(metadata, str):
+            metadata = {"true": True, "": False, "false": False}.get(
+                metadata.strip().lower(), metadata
+            )
 
-        self.cache_link_parsing = cache_link_parsing
+        self._metadata = metadata
+        self._yanked = yanked
 
     def __str__(self) -> str:
         if self.requires_python:
             rp = f" (requires-python:{self.requires_python})"
         else:
             rp = ""
-        if self.comes_from:
-            return "{} (from {}){}".format(
-                redact_auth_from_url(self._url), self.comes_from, rp
-            )
-        else:
-            return redact_auth_from_url(str(self._url))
+
+        return f"{self.url}{rp}"
 
     def __repr__(self) -> str:
-        return f"<Link {self}>"
+        return f"<Link {self!s}>"
 
-    @property
-    def url(self) -> str:
-        return self._url
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url == other.url
 
-    @property
+    def __ne__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url != other.url
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url < other.url
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url <= other.url
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url > other.url
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self.url >= other.url
+
+    def __hash__(self) -> int:
+        return hash(self.url)
+
+    @cached_property
     def filename(self) -> str:
-        path = self.path.rstrip("/")
-        name = posixpath.basename(path)
-        if not name:
-            # Make sure we don't leak auth information if the netloc
-            # includes a username and password.
-            netloc, user_pass = split_auth_from_netloc(self.netloc)
-            return netloc
+        _, netloc, path, _, _ = urlparse.urlsplit(self.url)
+        name = posixpath.basename(path.rstrip("/")) or netloc
+        name = urlparse.unquote(name)
 
-        name = urllib.parse.unquote(name)
-        assert name, f"URL {self._url!r} produced no filename"
         return name
 
-    @property
-    def file_path(self) -> str:
-        return url_to_path(self.url)
-
-    @property
+    @cached_property
     def scheme(self) -> str:
-        return self._parsed_url.scheme
+        return urlparse.urlsplit(self.url)[0]
 
-    @property
+    @cached_property
     def netloc(self) -> str:
-        """
-        This can contain auth information.
-        """
-        return self._parsed_url.netloc
+        return urlparse.urlsplit(self.url)[1]
 
-    @property
+    @cached_property
     def path(self) -> str:
-        return urllib.parse.unquote(self._parsed_url.path)
+        return urlparse.unquote(urlparse.urlsplit(self.url)[2])
 
-    def splitext(self) -> Tuple[str, str]:
+    def splitext(self) -> tuple[str, str]:
         return splitext(posixpath.basename(self.path.rstrip("/")))
 
-    @property
+    @cached_property
     def ext(self) -> str:
         return self.splitext()[1]
 
-    @property
+    @cached_property
     def url_without_fragment(self) -> str:
-        scheme, netloc, path, query, fragment = self._parsed_url
-        return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
+        scheme, netloc, path, query, fragment = urlparse.urlsplit(self.url)
+        return urlparse.urlunsplit((scheme, netloc, path, query, None))
 
     _egg_fragment_re = re.compile(r"[#&]egg=([^&]*)")
 
-    @property
-    def egg_fragment(self) -> Optional[str]:
-        match = self._egg_fragment_re.search(self._url)
+    @cached_property
+    def egg_fragment(self) -> str | None:
+        match = self._egg_fragment_re.search(self.url)
         if not match:
             return None
         return match.group(1)
 
     _subdirectory_fragment_re = re.compile(r"[#&]subdirectory=([^&]*)")
 
-    @property
-    def subdirectory_fragment(self) -> Optional[str]:
-        match = self._subdirectory_fragment_re.search(self._url)
+    @cached_property
+    def subdirectory_fragment(self) -> str | None:
+        match = self._subdirectory_fragment_re.search(self.url)
         if not match:
             return None
         return match.group(1)
 
-    _hash_re = re.compile(
-        r"({choices})=([a-f0-9]+)".format(choices="|".join(_SUPPORTED_HASHES))
-    )
+    _hash_re = re.compile(r"(sha1|sha224|sha384|sha256|sha512|md5)=([a-f0-9]+)")
 
-    @property
-    def hash(self) -> Optional[str]:
-        match = self._hash_re.search(self._url)
-        if match:
-            return match.group(2)
-        return None
-
-    @property
-    def hash_name(self) -> Optional[str]:
-        match = self._hash_re.search(self._url)
-        if match:
-            return match.group(1)
-        return None
-
-    @property
-    def show_url(self) -> str:
-        return posixpath.basename(self._url.split("#", 1)[0].split("?", 1)[0])
-
-    @property
-    def is_file(self) -> bool:
-        return self.scheme == "file"
-
-    def is_existing_dir(self) -> bool:
-        return self.is_file and os.path.isdir(self.file_path)
-
-    @property
-    def is_wheel(self) -> bool:
-        return self.ext == WHEEL_EXTENSION
-
-    @property
-    def is_vcs(self) -> bool:
-        from pip._internal.vcs import vcs
-
-        return self.scheme in vcs.all_schemes
-
-    @property
-    def is_yanked(self) -> bool:
-        return self.yanked_reason is not None
-
-    @property
-    def has_hash(self) -> bool:
-        return self.hash_name is not None
-
-    def is_hash_allowed(self, hashes: Optional[Hashes]) -> bool:
-        """
-        Return True if the link has a hash and it is allowed.
-        """
-        if hashes is None or not self.has_hash:
+    @cached_property
+    def has_metadata(self) -> bool:
+        if self._metadata is None:
             return False
-        # Assert non-None so mypy knows self.hash_name and self.hash are str.
-        assert self.hash_name is not None
-        assert self.hash is not None
+        return bool(self._metadata) and (self.is_wheel or self.is_sdist)
 
-        return hashes.is_hash_allowed(self.hash_name, hex_digest=self.hash)
+    @cached_property
+    def metadata_url(self) -> str | None:
+        if self.has_metadata:
+            return f"{self.url_without_fragment.split('?', 1)[0]}.metadata"
+        return None
 
+    @cached_property
+    def metadata_hashes(self) -> Mapping[str, str]:
+        if self.has_metadata:
+            if isinstance(self._metadata, dict):
+                return self._metadata
+            if isinstance(self._metadata, str):
+                match = self._hash_re.search(self._metadata)
+                if match:
+                    return {match.group(1): match.group(2)}
+        return {}
 
-class _CleanResult(NamedTuple):
-    """Convert link for equivalency check.
+    @cached_property
+    def hashes(self) -> Mapping[str, str]:
+        if self._hashes:
+            return self._hashes
+        match = self._hash_re.search(self.url)
+        if match:
+            return {match.group(1): match.group(2)}
+        return {}
 
-    This is used in the resolver to check whether two URL-specified requirements
-    likely point to the same distribution and can be considered equivalent. This
-    equivalency logic avoids comparing URLs literally, which can be too strict
-    (e.g. "a=1&b=2" vs "b=2&a=1") and produce conflicts unexpecting to users.
+    @cached_property
+    def show_url(self) -> str:
+        return posixpath.basename(self.url.split("#", 1)[0].split("?", 1)[0])
 
-    Currently this does three things:
+    @cached_property
+    def is_wheel(self) -> bool:
+        return self.ext == ".whl"
 
-    1. Drop the basic auth part. This is technically wrong since a server can
-       serve different content based on auth, but if it does that, it is even
-       impossible to guarantee two URLs without auth are equivalent, since
-       the user can input different auth information when prompted. So the
-       practical solution is to assume the auth doesn't affect the response.
-    2. Parse the query to avoid the ordering issue. Note that ordering under the
-       same key in the query are NOT cleaned; i.e. "a=1&a=2" and "a=2&a=1" are
-       still considered different.
-    3. Explicitly drop most of the fragment part, except ``subdirectory=`` and
-       hash values, since it should have no impact the downloaded content. Note
-       that this drops the "egg=" part historically used to denote the requested
-       project (and extras), which is wrong in the strictest sense, but too many
-       people are supplying it inconsistently to cause superfluous resolution
-       conflicts, so we choose to also ignore them.
-    """
+    @cached_property
+    def is_wininst(self) -> bool:
+        return self.ext == ".exe"
 
-    parsed: urllib.parse.SplitResult
-    query: Dict[str, List[str]]
-    subdirectory: str
-    hashes: Dict[str, str]
+    @cached_property
+    def is_egg(self) -> bool:
+        return self.ext == ".egg"
 
+    @cached_property
+    def is_sdist(self) -> bool:
+        return self.ext in {".tar.bz2", ".tar.gz", ".zip"}
 
-def _clean_link(link: Link) -> _CleanResult:
-    parsed = link._parsed_url
-    netloc = parsed.netloc.rsplit("@", 1)[-1]
-    # According to RFC 8089, an empty host in file: means localhost.
-    if parsed.scheme == "file" and not netloc:
-        netloc = "localhost"
-    fragment = urllib.parse.parse_qs(parsed.fragment)
-    if "egg" in fragment:
-        logger.debug("Ignoring egg= fragment in %s", link)
-    try:
-        # If there are multiple subdirectory values, use the first one.
-        # This matches the behavior of Link.subdirectory_fragment.
-        subdirectory = fragment["subdirectory"][0]
-    except (IndexError, KeyError):
-        subdirectory = ""
-    # If there are multiple hash values under the same algorithm, use the
-    # first one. This matches the behavior of Link.hash_value.
-    hashes = {k: fragment[k][0] for k in _SUPPORTED_HASHES if k in fragment}
-    return _CleanResult(
-        parsed=parsed._replace(netloc=netloc, query="", fragment=""),
-        query=urllib.parse.parse_qs(parsed.query),
-        subdirectory=subdirectory,
-        hashes=hashes,
-    )
+    @cached_property
+    def yanked(self) -> bool:
+        return isinstance(self._yanked, str) or bool(self._yanked)
 
-
-@functools.lru_cache(maxsize=None)
-def links_equivalent(link1: Link, link2: Link) -> bool:
-    return _clean_link(link1) == _clean_link(link2)
+    @cached_property
+    def yanked_reason(self) -> str:
+        if isinstance(self._yanked, str):
+            return self._yanked
+        return ""

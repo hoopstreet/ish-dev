@@ -1,12 +1,63 @@
-#!/usr/bin/env python3
-import os
-from dotenv import load_dotenv
-load_dotenv("/root/.hoopstreet/creds/.env")
-class Secrets:
-    def __init__(self):
-        self.github = os.getenv("GITHUB_TOKEN")
-        self.supabase_url = os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("SUPABASE_KEY")
-        self.gemini = [k for k in os.getenv("GEMINI_KEYS","").split(",") if k]
-        self.openrouter = [k for k in os.getenv("OPENROUTER_KEYS","").split(",") if k]
-secrets = Secrets()
+
+__all__ = ['BaseLoader', 'FullLoader', 'SafeLoader', 'Loader', 'UnsafeLoader']
+
+from .reader import *
+from .scanner import *
+from .parser import *
+from .composer import *
+from .constructor import *
+from .resolver import *
+
+class BaseLoader(Reader, Scanner, Parser, Composer, BaseConstructor, BaseResolver):
+
+    def __init__(self, stream):
+        Reader.__init__(self, stream)
+        Scanner.__init__(self)
+        Parser.__init__(self)
+        Composer.__init__(self)
+        BaseConstructor.__init__(self)
+        BaseResolver.__init__(self)
+
+class FullLoader(Reader, Scanner, Parser, Composer, FullConstructor, Resolver):
+
+    def __init__(self, stream):
+        Reader.__init__(self, stream)
+        Scanner.__init__(self)
+        Parser.__init__(self)
+        Composer.__init__(self)
+        FullConstructor.__init__(self)
+        Resolver.__init__(self)
+
+class SafeLoader(Reader, Scanner, Parser, Composer, SafeConstructor, Resolver):
+
+    def __init__(self, stream):
+        Reader.__init__(self, stream)
+        Scanner.__init__(self)
+        Parser.__init__(self)
+        Composer.__init__(self)
+        SafeConstructor.__init__(self)
+        Resolver.__init__(self)
+
+class Loader(Reader, Scanner, Parser, Composer, Constructor, Resolver):
+
+    def __init__(self, stream):
+        Reader.__init__(self, stream)
+        Scanner.__init__(self)
+        Parser.__init__(self)
+        Composer.__init__(self)
+        Constructor.__init__(self)
+        Resolver.__init__(self)
+
+# UnsafeLoader is the same as Loader (which is and was always unsafe on
+# untrusted input). Use of either Loader or UnsafeLoader should be rare, since
+# FullLoad should be able to load almost all YAML safely. Loader is left intact
+# to ensure backwards compatibility.
+class UnsafeLoader(Reader, Scanner, Parser, Composer, Constructor, Resolver):
+
+    def __init__(self, stream):
+        Reader.__init__(self, stream)
+        Scanner.__init__(self)
+        Parser.__init__(self)
+        Composer.__init__(self)
+        Constructor.__init__(self)
+        Resolver.__init__(self)

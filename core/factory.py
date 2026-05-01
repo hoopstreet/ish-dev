@@ -1,739 +1,1087 @@
-import contextlib
-import functools
+from __future__ import annotations
+
 import logging
-from typing import (
-    TYPE_CHECKING,
-    Dict,
-    FrozenSet,
-    Iterable,
-    Iterator,
-    List,
-    Mapping,
-    NamedTuple,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
-    TypeVar,
-    cast,
-)
 
-from pip._vendor.packaging.requirements import InvalidRequirement
-from pip._vendor.packaging.specifiers import SpecifierSet
-from pip._vendor.packaging.utils import NormalizedName, canonicalize_name
-from pip._vendor.resolvelib import ResolutionImpossible
+from collections import defaultdict
+from collections.abc import Mapping
+from itertools import chain
+from pathlib import Path
+from typing import TYPE_CHECKING
+from typing import Any
+from typing import Literal
+from typing import Union
 
-from pip._internal.cache import CacheEntry, WheelCache
-from pip._internal.exceptions import (
-    DistributionNotFound,
-    InstallationError,
-    InstallationSubprocessError,
-    MetadataInconsistent,
-    UnsupportedPythonVersion,
-    UnsupportedWheel,
-)
-from pip._internal.index.package_finder import PackageFinder
-from pip._internal.metadata import BaseDistribution, get_default_environment
-from pip._internal.models.link import Link
-from pip._internal.models.wheel import Wheel
-from pip._internal.operations.prepare import RequirementPreparer
-from pip._internal.req.constructors import install_req_from_link_and_ireq
-from pip._internal.req.req_install import (
-    InstallRequirement,
-    check_invalid_constraint_type,
-)
-from pip._internal.resolution.base import InstallRequirementProvider
-from pip._internal.utils.compatibility_tags import get_supported
-from pip._internal.utils.hashes import Hashes
-from pip._internal.utils.packaging import get_requirement
-from pip._internal.utils.virtualenv import running_under_virtualenv
+from packaging.licenses import InvalidLicenseExpression
+from packaging.licenses import canonicalize_license_expression
+from packaging.utils import canonicalize_name
 
-from .base import Candidate, CandidateVersion, Constraint, Requirement
-from .candidates import (
-    AlreadyInstalledCandidate,
-    BaseCandidate,
-    EditableCandidate,
-    ExtrasCandidate,
-    LinkCandidate,
-    RequiresPythonCandidate,
-    as_base_candidate,
-)
-from .found_candidates import FoundCandidates, IndexCandidateInfo
-from .requirements import (
-    ExplicitRequirement,
-    RequiresPythonRequirement,
-    SpecifierRequirement,
-    UnsatisfiableRequirement,
-)
+from poetry.core.packages.dependency import Dependency
+from poetry.core.packages.dependency_group import DependencyGroup
+from poetry.core.utils.helpers import combine_unicode
+from poetry.core.utils.helpers import readme_content_type
+
 
 if TYPE_CHECKING:
-    from typing import Protocol
+    from packaging.utils import NormalizedName
 
-    class ConflictCause(Protocol):
-        requirement: RequiresPythonRequirement
-        parent: Candidate
+    from poetry.core.packages.project_package import ProjectPackage
+    from poetry.core.poetry import Poetry
+    from poetry.core.pyproject.toml import PyProjectTOML
+
+    DependencyConstraint = Union[str, Mapping[str, Any]]
+    DependencyConfig = Mapping[
+        str, Union[list[DependencyConstraint], DependencyConstraint]
+    ]
 
 
 logger = logging.getLogger(__name__)
 
-C = TypeVar("C")
-Cache = Dict[Link, C]
-
-
-class CollectedRootRequirements(NamedTuple):
-    requirements: List[Requirement]
-    constraints: Dict[str, Constraint]
-    user_requested: Dict[str, int]
-
 
 class Factory:
-    def __init__(
-        self,
-        finder: PackageFinder,
-        preparer: RequirementPreparer,
-        make_install_req: InstallRequirementProvider,
-        wheel_cache: Optional[WheelCache],
-        use_user_site: bool,
-        force_reinstall: bool,
-        ignore_installed: bool,
-        ignore_requires_python: bool,
-        suppress_build_failures: bool,
-        py_version_info: Optional[Tuple[int, ...]] = None,
-    ) -> None:
-        self._finder = finder
-        self.preparer = preparer
-        self._wheel_cache = wheel_cache
-        self._python_candidate = RequiresPythonCandidate(py_version_info)
-        self._make_install_req_from_spec = make_install_req
-        self._use_user_site = use_user_site
-        self._force_reinstall = force_reinstall
-        self._ignore_requires_python = ignore_requires_python
-        self._suppress_build_failures = suppress_build_failures
+    """
+    Factory class to create various elements needed by Poetry.
+    """
 
-        self._build_failures: Cache[InstallationError] = {}
-        self._link_candidate_cache: Cache[LinkCandidate] = {}
-        self._editable_candidate_cache: Cache[EditableCandidate] = {}
-        self._installed_candidate_cache: Dict[str, AlreadyInstalledCandidate] = {}
-        self._extras_candidate_cache: Dict[
-            Tuple[int, FrozenSet[str]], ExtrasCandidate
-        ] = {}
+    def create_poetry(
+        self, cwd: Path | None = None, with_groups: bool = True
+    ) -> Poetry:
+        from poetry.core.poetry import Poetry
+        from poetry.core.pyproject.toml import PyProjectTOML
 
-        if not ignore_installed:
-            env = get_default_environment()
-            self._installed_dists = {
-                dist.canonical_name: dist
-                for dist in env.iter_installed_distributions(local_only=False)
-            }
-        else:
-            self._installed_dists = {}
+        poetry_file = self.locate(cwd)
+        pyproject = PyProjectTOML(path=poetry_file)
 
-    @property
-    def force_reinstall(self) -> bool:
-        return self._force_reinstall
+        # Checking validity
+        check_result = self.validate(pyproject.data)
+        if check_result["errors"]:
+            message = ""
+            for error in check_result["errors"]:
+                message += f"  - {error}\n"
 
-    def _fail_if_link_is_unsupported_wheel(self, link: Link) -> None:
-        if not link.is_wheel:
-            return
-        wheel = Wheel(link.filename)
-        if wheel.supported(self._finder.target_python.get_tags()):
-            return
-        msg = f"{link.filename} is not a supported wheel on this platform."
-        raise UnsupportedWheel(msg)
+            raise RuntimeError("The Poetry configuration is invalid:\n" + message)
 
-    def _make_extras_candidate(
-        self, base: BaseCandidate, extras: FrozenSet[str]
-    ) -> ExtrasCandidate:
-        cache_key = (id(base), extras)
-        try:
-            candidate = self._extras_candidate_cache[cache_key]
-        except KeyError:
-            candidate = ExtrasCandidate(base, extras)
-            self._extras_candidate_cache[cache_key] = candidate
-        return candidate
+        for warning in check_result["warnings"]:
+            logger.warning(warning)
 
-    def _make_candidate_from_dist(
-        self,
-        dist: BaseDistribution,
-        extras: FrozenSet[str],
-        template: InstallRequirement,
-    ) -> Candidate:
-        try:
-            base = self._installed_candidate_cache[dist.canonical_name]
-        except KeyError:
-            base = AlreadyInstalledCandidate(dist, template, factory=self)
-            self._installed_candidate_cache[dist.canonical_name] = base
-        if not extras:
-            return base
-        return self._make_extras_candidate(base, extras)
-
-    def _make_candidate_from_link(
-        self,
-        link: Link,
-        extras: FrozenSet[str],
-        template: InstallRequirement,
-        name: Optional[NormalizedName],
-        version: Optional[CandidateVersion],
-    ) -> Optional[Candidate]:
-        # TODO: Check already installed candidate, and use it if the link and
-        # editable flag match.
-
-        if link in self._build_failures:
-            # We already tried this candidate before, and it does not build.
-            # Don't bother trying again.
-            return None
-
-        if template.editable:
-            if link not in self._editable_candidate_cache:
-                try:
-                    self._editable_candidate_cache[link] = EditableCandidate(
-                        link,
-                        template,
-                        factory=self,
-                        name=name,
-                        version=version,
-                    )
-                except MetadataInconsistent as e:
-                    logger.info(
-                        "Discarding [blue underline]%s[/]: [yellow]%s[reset]",
-                        link,
-                        e,
-                        extra={"markup": True},
-                    )
-                    self._build_failures[link] = e
-                    return None
-                except InstallationSubprocessError as e:
-                    if not self._suppress_build_failures:
-                        raise
-                    logger.warning("Discarding %s due to build failure: %s", link, e)
-                    self._build_failures[link] = e
-                    return None
-
-            base: BaseCandidate = self._editable_candidate_cache[link]
-        else:
-            if link not in self._link_candidate_cache:
-                try:
-                    self._link_candidate_cache[link] = LinkCandidate(
-                        link,
-                        template,
-                        factory=self,
-                        name=name,
-                        version=version,
-                    )
-                except MetadataInconsistent as e:
-                    logger.info(
-                        "Discarding [blue underline]%s[/]: [yellow]%s[reset]",
-                        link,
-                        e,
-                        extra={"markup": True},
-                    )
-                    self._build_failures[link] = e
-                    return None
-                except InstallationSubprocessError as e:
-                    if not self._suppress_build_failures:
-                        raise
-                    logger.warning("Discarding %s due to build failure: %s", link, e)
-                    self._build_failures[link] = e
-                    return None
-            base = self._link_candidate_cache[link]
-
-        if not extras:
-            return base
-        return self._make_extras_candidate(base, extras)
-
-    def _iter_found_candidates(
-        self,
-        ireqs: Sequence[InstallRequirement],
-        specifier: SpecifierSet,
-        hashes: Hashes,
-        prefers_installed: bool,
-        incompatible_ids: Set[int],
-    ) -> Iterable[Candidate]:
-        if not ireqs:
-            return ()
-
-        # The InstallRequirement implementation requires us to give it a
-        # "template". Here we just choose the first requirement to represent
-        # all of them.
-        # Hopefully the Project model can correct this mismatch in the future.
-        template = ireqs[0]
-        assert template.req, "Candidates found on index must be PEP 508"
-        name = canonicalize_name(template.req.name)
-
-        extras: FrozenSet[str] = frozenset()
-        for ireq in ireqs:
-            assert ireq.req, "Candidates found on index must be PEP 508"
-            specifier &= ireq.req.specifier
-            hashes &= ireq.hashes(trust_internet=False)
-            extras |= frozenset(ireq.extras)
-
-        def _get_installed_candidate() -> Optional[Candidate]:
-            """Get the candidate for the currently-installed version."""
-            # If --force-reinstall is set, we want the version from the index
-            # instead, so we "pretend" there is nothing installed.
-            if self._force_reinstall:
-                return None
-            try:
-                installed_dist = self._installed_dists[name]
-            except KeyError:
-                return None
-            # Don't use the installed distribution if its version does not fit
-            # the current dependency graph.
-            if not specifier.contains(installed_dist.version, prereleases=True):
-                return None
-            candidate = self._make_candidate_from_dist(
-                dist=installed_dist,
-                extras=extras,
-                template=template,
-            )
-            # The candidate is a known incompatibility. Don't use it.
-            if id(candidate) in incompatible_ids:
-                return None
-            return candidate
-
-        def iter_index_candidate_infos() -> Iterator[IndexCandidateInfo]:
-            result = self._finder.find_best_candidate(
-                project_name=name,
-                specifier=specifier,
-                hashes=hashes,
-            )
-            icans = list(result.iter_applicable())
-
-            # PEP 592: Yanked releases are ignored unless the specifier
-            # explicitly pins a version (via '==' or '===') that can be
-            # solely satisfied by a yanked release.
-            all_yanked = all(ican.link.is_yanked for ican in icans)
-
-            def is_pinned(specifier: SpecifierSet) -> bool:
-                for sp in specifier:
-                    if sp.operator == "===":
-                        return True
-                    if sp.operator != "==":
-                        continue
-                    if sp.version.endswith(".*"):
-                        continue
-                    return True
-                return False
-
-            pinned = is_pinned(specifier)
-
-            # PackageFinder returns earlier versions first, so we reverse.
-            for ican in reversed(icans):
-                if not (all_yanked and pinned) and ican.link.is_yanked:
-                    continue
-                func = functools.partial(
-                    self._make_candidate_from_link,
-                    link=ican.link,
-                    extras=extras,
-                    template=template,
-                    name=name,
-                    version=ican.version,
-                )
-                yield ican.version, func
-
-        return FoundCandidates(
-            iter_index_candidate_infos,
-            _get_installed_candidate(),
-            prefers_installed,
-            incompatible_ids,
+        # Load package
+        # If name or version were missing in package mode, we would have already
+        # raised an error, so we can safely assume they might only be missing
+        # in non-package mode and use some dummy values in this case.
+        project = pyproject.data.get("project", {})
+        name = project.get("name") or pyproject.poetry_config.get(
+            "name", "non-package-mode"
+        )
+        assert isinstance(name, str)
+        version = project.get("version") or pyproject.poetry_config.get("version", "0")
+        assert isinstance(version, str)
+        package = self.get_package(name, version)
+        self.configure_package(
+            package, pyproject, poetry_file.parent, with_groups=with_groups
         )
 
-    def _iter_explicit_candidates_from_base(
-        self,
-        base_requirements: Iterable[Requirement],
-        extras: FrozenSet[str],
-    ) -> Iterator[Candidate]:
-        """Produce explicit candidates from the base given an extra-ed package.
+        return Poetry(poetry_file, pyproject.poetry_config, package)
 
-        :param base_requirements: Requirements known to the resolver. The
-            requirements are guaranteed to not have extras.
-        :param extras: The extras to inject into the explicit requirements'
-            candidates.
-        """
-        for req in base_requirements:
-            lookup_cand, _ = req.get_candidate_lookup()
-            if lookup_cand is None:  # Not explicit.
-                continue
-            # We've stripped extras from the identifier, and should always
-            # get a BaseCandidate here, unless there's a bug elsewhere.
-            base_cand = as_base_candidate(lookup_cand)
-            assert base_cand is not None, "no extras here"
-            yield self._make_extras_candidate(base_cand, extras)
+    @classmethod
+    def get_package(cls, name: str, version: str) -> ProjectPackage:
+        from poetry.core.packages.project_package import ProjectPackage
 
-    def _iter_candidates_from_constraints(
-        self,
-        identifier: str,
-        constraint: Constraint,
-        template: InstallRequirement,
-    ) -> Iterator[Candidate]:
-        """Produce explicit candidates from constraints.
+        return ProjectPackage(name, version)
 
-        This creates "fake" InstallRequirement objects that are basically clones
-        of what "should" be the template, but with original_link set to link.
-        """
-        for link in constraint.links:
-            self._fail_if_link_is_unsupported_wheel(link)
-            candidate = self._make_candidate_from_link(
-                link,
-                extras=frozenset(),
-                template=install_req_from_link_and_ireq(link, template),
-                name=canonicalize_name(identifier),
-                version=None,
+    @classmethod
+    def _add_package_pep735_group_dependencies(
+        cls,
+        package: ProjectPackage,
+        group: DependencyGroup,
+        dependencies: list[str | dict[str, str]],
+    ) -> list[str]:
+        group_includes = []
+        for constraint in dependencies:
+            if isinstance(constraint, str):
+                dep = Dependency.create_from_pep_508(
+                    constraint,
+                    relative_to=package.root_dir,
+                    groups=[group.pretty_name],
+                )
+                group.add_dependency(dep)
+            elif include := constraint.get("include-group"):
+                group_includes.append(include)
+        return group_includes
+
+    @classmethod
+    def _add_package_poetry_group_dependencies(
+        cls,
+        package: ProjectPackage,
+        group: str | DependencyGroup,
+        dependencies: DependencyConfig,
+    ) -> None:
+        from poetry.core.packages.dependency_group import MAIN_GROUP
+
+        if isinstance(group, str):
+            if package.has_dependency_group(group):
+                group = package.dependency_group(group)
+            else:
+                from poetry.core.packages.dependency_group import DependencyGroup
+
+                group = DependencyGroup(group)
+
+        for name, constraints in dependencies.items():
+            _constraints = (
+                constraints if isinstance(constraints, list) else [constraints]
             )
-            if candidate:
-                yield candidate
+            for _constraint in _constraints:
+                if name.lower() == "python":
+                    if group.name == MAIN_GROUP and isinstance(_constraint, str):
+                        package.python_versions = _constraint
+                    continue
 
-    def find_candidates(
-        self,
-        identifier: str,
-        requirements: Mapping[str, Iterable[Requirement]],
-        incompatibilities: Mapping[str, Iterator[Candidate]],
-        constraint: Constraint,
-        prefers_installed: bool,
-    ) -> Iterable[Candidate]:
-        # Collect basic lookup information from the requirements.
-        explicit_candidates: Set[Candidate] = set()
-        ireqs: List[InstallRequirement] = []
-        for req in requirements[identifier]:
-            cand, ireq = req.get_candidate_lookup()
-            if cand is not None:
-                explicit_candidates.add(cand)
-            if ireq is not None:
-                ireqs.append(ireq)
+                group.add_poetry_dependency(
+                    cls.create_dependency(
+                        name,
+                        _constraint,
+                        groups=[group.name],
+                        root_dir=package.root_dir,
+                    )
+                )
 
-        # If the current identifier contains extras, add explicit candidates
-        # from entries from extra-less identifier.
-        with contextlib.suppress(InvalidRequirement):
-            parsed_requirement = get_requirement(identifier)
-            explicit_candidates.update(
-                self._iter_explicit_candidates_from_base(
-                    requirements.get(parsed_requirement.name, ()),
-                    frozenset(parsed_requirement.extras),
+        package.add_dependency_group(group)
+
+    @classmethod
+    def configure_package(
+        cls,
+        package: ProjectPackage,
+        pyproject: PyProjectTOML,
+        root: Path,
+        with_groups: bool = True,
+    ) -> None:
+        project = pyproject.data.get("project", {})
+        tool_poetry = pyproject.poetry_config
+        dependency_groups = pyproject.data.get("dependency-groups", {})
+
+        package.root_dir = root
+
+        cls._configure_package_metadata(package, project, tool_poetry, root)
+        cls._configure_entry_points(package, project, tool_poetry)
+        cls._configure_package_dependencies(
+            package=package,
+            project=project,
+            tool_poetry=tool_poetry,
+            dependency_groups=dependency_groups,
+            with_groups=with_groups,
+        )
+        cls._configure_package_poetry_specifics(package, tool_poetry)
+
+    @classmethod
+    def _configure_package_metadata(
+        cls,
+        package: ProjectPackage,
+        project: dict[str, Any],
+        tool_poetry: dict[str, Any],
+        root: Path,
+    ) -> None:
+        from poetry.core.spdx.helpers import license_by_id
+
+        for key in ("authors", "maintainers"):
+            if entries := project.get(key):
+                participants = []
+                for entry in entries:
+                    name, email = entry.get("name"), entry.get("email")
+                    if name and email:
+                        participants.append(combine_unicode(f"{name} <{email}>"))
+                    elif name:
+                        participants.append(combine_unicode(name))
+                    else:
+                        participants.append(combine_unicode(email))
+            else:
+                participants = [
+                    combine_unicode(author) for author in tool_poetry.get(key, [])
+                ]
+            if key == "authors":
+                package.authors = participants
+            else:
+                package.maintainers = participants
+
+        package.description = project.get("description") or tool_poetry.get(
+            "description", ""
+        )
+        raw_license: str | None = None
+        if project_license := project.get("license"):
+            if isinstance(project_license, str):
+                try:
+                    package.license_expression = canonicalize_license_expression(
+                        project_license
+                    )
+                except InvalidLicenseExpression:
+                    # This is handled in validate().
+                    raw_license = project_license
+            else:
+                # Table values for the license key in the [project] table,
+                # including the text and file table subkeys, are now deprecated.
+                # If the new license-files key is present, build tools MUST raise an
+                # error if the license key is defined and has a value other
+                # than a single top-level string.
+                # https://peps.python.org/pep-0639/#deprecate-license-key-table-subkeys
+                if "license-files" in project:
+                    raise ValueError(
+                        "[project.license] must be of type string"
+                        " if [project.license-files] is defined."
+                    )
+
+                # Tools MUST NOT use the contents of the license.text [project] key
+                # (or equivalent tool-specific format), [...] to fill [...] the Core
+                # Metadata License-Expression field without informing the user and
+                # requiring unambiguous, affirmative user action to select and confirm
+                # the desired license expression value before proceeding.
+                # https://peps.python.org/pep-0639/#converting-legacy-metadata
+                # -> We just set the old license field in this case
+                #    (and give a warning in validate).
+                raw_license = project_license.get("text")
+                if not raw_license and (license_file := project_license.get("file")):
+                    # If the specified license file is present in the source tree,
+                    # build tools SHOULD use it to fill the License-File field
+                    # in the core metadata, and MUST include the specified file
+                    # as if it were specified in a license-file field.
+                    # If the file does not exist at the specified path,
+                    # tools MUST raise an informative error as previously specified.
+                    # https://peps.python.org/pep-0639/#deprecate-license-key-table-subkeys
+                    license_path = (root / license_file).absolute()
+                    try:
+                        raw_license = Path(license_path).read_text(encoding="utf-8")
+                    except FileNotFoundError as e:
+                        raise FileNotFoundError(
+                            f"Poetry: license file '{license_path}' not found"
+                        ) from e
+                    else:
+                        # explicitly not a tuple to allow default handling
+                        # to find additional license files later
+                        package.license_files = Path(license_file)
+        else:
+            raw_license = tool_poetry.get("license")
+        if raw_license:
+            package.license = license_by_id(raw_license)
+
+        # important: distinction between empty array and None:
+        # - empty array: explicitly no license files
+        # - None (not set): default handling allowed
+        if (license_files := project.get("license-files")) is not None:
+            # Build tools MUST treat each value as a glob pattern,
+            # and MUST raise an error if the pattern contains invalid glob syntax.
+            # https://peps.python.org/pep-0639/#add-license-files-key
+            for entry in license_files:
+                if "\\" in entry:
+                    # Path delimiters MUST be the forward slash character (/).
+                    raise ValueError(
+                        f"Invalid entry in [project.license-files]: '{entry}'"
+                        " (Path delimiters must be forward slashes.)"
+                    )
+                if ".." in Path(entry).parts:
+                    # Parent directory indicators (..) MUST NOT be used.
+                    raise ValueError(
+                        f"Invalid entry in [project.license-files]: '{entry}'"
+                        " ('..' must not be used.)"
+                    )
+            package.license_files = tuple(license_files)
+
+        package.requires_python = project.get("requires-python", "*")
+        package.keywords = project.get("keywords") or tool_poetry.get("keywords", [])
+        package.classifiers = (
+            static_classifiers := project.get("classifiers")
+        ) or tool_poetry.get("classifiers", [])
+        package.dynamic_classifiers = not static_classifiers
+
+        if urls := project.get("urls"):
+            custom_urls = {}
+            for name, url in urls.items():
+                lower_name = name.lower()
+                if lower_name == "homepage":
+                    package.homepage = url
+                elif lower_name == "repository":
+                    package.repository_url = url
+                elif lower_name == "documentation":
+                    package.documentation_url = url
+                else:
+                    custom_urls[name] = url
+            package.custom_urls = custom_urls
+        else:
+            package.homepage = tool_poetry.get("homepage")
+            package.repository_url = tool_poetry.get("repository")
+            package.documentation_url = tool_poetry.get("documentation")
+            if "urls" in tool_poetry:
+                package.custom_urls = tool_poetry["urls"]
+
+        if readme := project.get("readme"):
+            if isinstance(readme, str):
+                package.readmes = (root / readme,)
+            elif "file" in readme:
+                package.readmes = (root / readme["file"],)
+                package.readme_content_type = readme["content-type"]
+            elif "text" in readme:
+                package.readme_content = root / readme["text"]
+                package.readme_content_type = readme["content-type"]
+        elif custom_readme := tool_poetry.get("readme"):
+            custom_readmes = (
+                (custom_readme,) if isinstance(custom_readme, str) else custom_readme
+            )
+            package.readmes = tuple(root / r for r in custom_readmes if r)
+
+    @classmethod
+    def _configure_entry_points(
+        cls,
+        package: ProjectPackage,
+        project: dict[str, Any],
+        tool_poetry: dict[str, Any],
+    ) -> None:
+        entry_points: defaultdict[str, dict[str, str]] = defaultdict(dict)
+
+        if scripts := project.get("scripts"):
+            entry_points["console-scripts"] = scripts
+        elif scripts := tool_poetry.get("scripts"):
+            for name, specification in scripts.items():
+                if isinstance(specification, str):
+                    specification = {"reference": specification, "type": "console"}
+
+                if specification.get("type") != "console":
+                    continue
+
+                reference = specification.get("reference")
+
+                if reference:
+                    entry_points["console-scripts"][name] = reference
+
+        if scripts := project.get("gui-scripts"):
+            entry_points["gui-scripts"] = scripts
+
+        if other_scripts := project.get("entry-points"):
+            for group_name, scripts in sorted(other_scripts.items()):
+                if group_name in {"console-scripts", "gui-scripts"}:
+                    raise ValueError(
+                        f"Group '{group_name}' is reserved and cannot be used"
+                        " as a custom entry-point group."
+                    )
+                entry_points[group_name] = scripts
+        elif other_scripts := tool_poetry.get("plugins"):
+            for group_name, scripts in sorted(other_scripts.items()):
+                entry_points[group_name] = scripts
+
+        package.entry_points = dict(entry_points)
+
+    @classmethod
+    def _configure_package_dependencies(
+        cls,
+        package: ProjectPackage,
+        project: dict[str, Any],
+        tool_poetry: dict[str, Any],
+        dependency_groups: dict[str, list[str | dict[str, str]]],
+        with_groups: bool = True,
+    ) -> None:
+        from poetry.core.packages.dependency import Dependency
+        from poetry.core.packages.dependency_group import MAIN_GROUP
+        from poetry.core.packages.dependency_group import DependencyGroup
+
+        dependencies = project.get("dependencies", {})
+        optional_dependencies = project.get("optional-dependencies", {})
+        dynamic = project.get("dynamic", [])
+
+        package_extras: dict[NormalizedName, list[Dependency]]
+        if dependencies or optional_dependencies:
+            group = DependencyGroup(
+                MAIN_GROUP,
+                mixed_dynamic=(
+                    "dependencies" in dynamic or "optional-dependencies" in dynamic
                 ),
             )
+            package.add_dependency_group(group)
 
-        # Add explicit candidates from constraints. We only do this if there are
-        # known ireqs, which represent requirements not already explicit. If
-        # there are no ireqs, we're constraining already-explicit requirements,
-        # which is handled later when we return the explicit candidates.
-        if ireqs:
-            try:
-                explicit_candidates.update(
-                    self._iter_candidates_from_constraints(
-                        identifier,
-                        constraint,
-                        template=ireqs[0],
-                    ),
+            for constraint in dependencies:
+                group.add_dependency(
+                    Dependency.create_from_pep_508(
+                        constraint, relative_to=package.root_dir
+                    )
                 )
-            except UnsupportedWheel:
-                # If we're constrained to install a wheel incompatible with the
-                # target architecture, no candidates will ever be valid.
-                return ()
+            package_extras = {}
+            for extra_name, dependencies in optional_dependencies.items():
+                extra_name = canonicalize_name(extra_name)
+                package_extras[extra_name] = []
 
-        # Since we cache all the candidates, incompatibility identification
-        # can be made quicker by comparing only the id() values.
-        incompat_ids = {id(c) for c in incompatibilities.get(identifier, ())}
+                for dependency_constraint in dependencies:
+                    dependency = Dependency.create_from_pep_508(
+                        dependency_constraint, relative_to=package.root_dir
+                    )
+                    dependency._optional = True
+                    dependency._in_extras = [extra_name]
 
-        # If none of the requirements want an explicit candidate, we can ask
-        # the finder for candidates.
-        if not explicit_candidates:
-            return self._iter_found_candidates(
-                ireqs,
-                constraint.specifier,
-                constraint.hashes,
-                prefers_installed,
-                incompat_ids,
+                    package_extras[extra_name].append(dependency)
+                    group.add_dependency(dependency)
+
+            package.extras = package_extras
+
+        if "dependencies" in tool_poetry:
+            cls._add_package_poetry_group_dependencies(
+                package=package,
+                group=MAIN_GROUP,
+                dependencies=tool_poetry["dependencies"],
             )
 
-        return (
-            c
-            for c in explicit_candidates
-            if id(c) not in incompat_ids
-            and constraint.is_satisfied_by(c)
-            and all(req.is_satisfied_by(c) for req in requirements[identifier])
-        )
-
-    def _make_requirement_from_install_req(
-        self, ireq: InstallRequirement, requested_extras: Iterable[str]
-    ) -> Optional[Requirement]:
-        if not ireq.match_markers(requested_extras):
-            logger.info(
-                "Ignoring %s: markers '%s' don't match your environment",
-                ireq.name,
-                ireq.markers,
+        if with_groups:
+            cls._configure_package_dependency_groups(
+                package, tool_poetry, dependency_groups
             )
-            return None
-        if not ireq.link:
-            return SpecifierRequirement(ireq)
-        self._fail_if_link_is_unsupported_wheel(ireq.link)
-        cand = self._make_candidate_from_link(
-            ireq.link,
-            extras=frozenset(ireq.extras),
-            template=ireq,
-            name=canonicalize_name(ireq.name) if ireq.name else None,
-            version=None,
-        )
-        if cand is None:
-            # There's no way we can satisfy a URL requirement if the underlying
-            # candidate fails to build. An unnamed URL must be user-supplied, so
-            # we fail eagerly. If the URL is named, an unsatisfiable requirement
-            # can make the resolver do the right thing, either backtrack (and
-            # maybe find some other requirement that's buildable) or raise a
-            # ResolutionImpossible eventually.
-            if not ireq.name:
-                raise self._build_failures[ireq.link]
-            return UnsatisfiableRequirement(canonicalize_name(ireq.name))
-        return self.make_requirement_from_candidate(cand)
 
-    def collect_root_requirements(
-        self, root_ireqs: List[InstallRequirement]
-    ) -> CollectedRootRequirements:
-        collected = CollectedRootRequirements([], {}, {})
-        for i, ireq in enumerate(root_ireqs):
-            if ireq.constraint:
-                # Ensure we only accept valid constraints
-                problem = check_invalid_constraint_type(ireq)
-                if problem:
-                    raise InstallationError(problem)
-                if not ireq.match_markers():
-                    continue
-                assert ireq.name, "Constraint must be named"
-                name = canonicalize_name(ireq.name)
-                if name in collected.constraints:
-                    collected.constraints[name] &= ireq
+        if with_groups and "dev-dependencies" in tool_poetry:
+            cls._add_package_poetry_group_dependencies(
+                package=package,
+                group="dev",
+                dependencies=tool_poetry["dev-dependencies"],
+            )
+
+        # ignore extras in [tool.poetry] if dependencies or optional-dependencies
+        # are declared in [project]
+        if not dependencies and not optional_dependencies:
+            package_extras = {}
+            extras = tool_poetry.get("extras", {})
+            for extra_name, requirements in extras.items():
+                extra_name = canonicalize_name(extra_name)
+                package_extras[extra_name] = []
+
+                # Checking for dependency
+                for req in requirements:
+                    req = Dependency(req, "*")
+
+                    for dep in package.requires:
+                        if dep.name == req.name:
+                            dep._in_extras = [*dep._in_extras, extra_name]
+                            package_extras[extra_name].append(dep)
+
+            package.extras = package_extras
+
+    @classmethod
+    def _configure_package_dependency_groups(
+        cls,
+        package: ProjectPackage,
+        tool_poetry: dict[str, Any],
+        dependency_groups: dict[str, list[str | dict[str, str]]],
+    ) -> None:
+        tool_poetry_groups = tool_poetry.get("group", {})
+        tool_poetry_groups_normalized = {
+            canonicalize_name(name): config
+            for name, config in tool_poetry_groups.items()
+        }
+        # create groups from the dependency-groups section considering
+        # additional information from the corresponding tool.poetry.group section
+        pep739_include_groups = {}
+        for group_name, dependencies in dependency_groups.items():
+            poetry_group_config = tool_poetry_groups_normalized.get(
+                canonicalize_name(group_name), {}
+            )
+            group = DependencyGroup(
+                name=group_name,
+                optional=poetry_group_config.get("optional", False),
+            )
+            package.add_dependency_group(group)
+            included_groups = cls._add_package_pep735_group_dependencies(
+                package=package,
+                group=group,
+                dependencies=dependencies,
+            )
+            pep739_include_groups[group_name] = included_groups
+        # create groups from the tool.poetry.group section
+        # with no corresponding entry in dependency-groups
+        # and add dependency information for existing groups
+        poetry_include_groups = {}
+        for group_name, group_config in tool_poetry_groups.items():
+            poetry_include_groups[group_name] = group_config.get("include-groups", [])
+            if package.has_dependency_group(group_name):
+                group = package.dependency_group(group_name)
+            else:
+                group = DependencyGroup(
+                    name=group_name,
+                    optional=group_config.get("optional", False),
+                )
+                package.add_dependency_group(group)
+            cls._add_package_poetry_group_dependencies(
+                package=package,
+                group=group,
+                dependencies=group_config.get("dependencies", {}),
+            )
+
+        for group_name, include_groups in chain(
+            pep739_include_groups.items(), poetry_include_groups.items()
+        ):
+            if include_groups:
+                current_group = package.dependency_group(group_name)
+                for name in include_groups:
+                    try:
+                        # `name` isn't normalized,
+                        # but `.dependency_group()` handles that.
+                        group_to_include = package.dependency_group(name)
+                    except ValueError as e:
+                        raise ValueError(
+                            f"Group '{group_name}' includes group '{name}'"
+                            " which is not defined."
+                        ) from e
+
+                    current_group.include_dependency_group(group_to_include)
+
+    @classmethod
+    def _prepare_formats(
+        cls,
+        items: list[dict[str, Any]],
+        default_formats: list[Literal["sdist", "wheel"]],
+    ) -> list[dict[str, Any]]:
+        result = []
+        for item in items:
+            formats = item.get("format", default_formats)
+            if not isinstance(formats, list):
+                formats = [formats]
+
+            result.append({**item, "format": formats})
+
+        return result
+
+    @classmethod
+    def _configure_package_poetry_specifics(
+        cls, package: ProjectPackage, tool_poetry: dict[str, Any]
+    ) -> None:
+        if build := tool_poetry.get("build"):
+            if not isinstance(build, dict):
+                build = {"script": build}
+            package.build_config = build or {}
+
+        if includes := tool_poetry.get("include"):
+            includes = [
+                include if isinstance(include, dict) else {"path": include}
+                for include in includes
+            ]
+
+            package.include = cls._prepare_formats(includes, default_formats=["sdist"])
+
+        if exclude := tool_poetry.get("exclude"):
+            package.exclude = exclude
+
+        if packages := tool_poetry.get("packages"):
+            package.packages = cls._prepare_formats(
+                packages, default_formats=["sdist", "wheel"]
+            )
+
+    @classmethod
+    def create_dependency(
+        cls,
+        name: str,
+        constraint: DependencyConstraint,
+        groups: list[str] | None = None,
+        root_dir: Path | None = None,
+    ) -> Dependency:
+        from poetry.core.constraints.generic import (
+            parse_constraint as parse_generic_constraint,
+        )
+        from poetry.core.constraints.version import (
+            parse_constraint as parse_version_constraint,
+        )
+        from poetry.core.packages.dependency import Dependency
+        from poetry.core.packages.dependency_group import MAIN_GROUP
+        from poetry.core.packages.directory_dependency import DirectoryDependency
+        from poetry.core.packages.file_dependency import FileDependency
+        from poetry.core.packages.url_dependency import URLDependency
+        from poetry.core.packages.utils.utils import create_nested_marker
+        from poetry.core.packages.vcs_dependency import VCSDependency
+        from poetry.core.version.markers import AnyMarker
+        from poetry.core.version.markers import parse_marker
+
+        if groups is None:
+            groups = [MAIN_GROUP]
+
+        if constraint is None:
+            constraint = "*"
+
+        if isinstance(constraint, Mapping):
+            optional = constraint.get("optional", False)
+            python_versions = constraint.get("python")
+            platform = constraint.get("platform")
+            markers = constraint.get("markers")
+            allows_prereleases = constraint.get("allow-prereleases")
+
+            dependency: Dependency
+            if "git" in constraint:
+                # VCS dependency
+                dependency = VCSDependency(
+                    name,
+                    "git",
+                    constraint["git"],
+                    branch=constraint.get("branch", None),
+                    tag=constraint.get("tag", None),
+                    rev=constraint.get("rev", None),
+                    directory=constraint.get("subdirectory", None),
+                    groups=groups,
+                    optional=optional,
+                    develop=constraint.get("develop", False),
+                    extras=constraint.get("extras", []),
+                )
+            elif "file" in constraint:
+                file_path = Path(constraint["file"])
+
+                dependency = FileDependency(
+                    name,
+                    file_path,
+                    directory=constraint.get("subdirectory", None),
+                    groups=groups,
+                    base=root_dir,
+                    extras=constraint.get("extras", []),
+                )
+            elif "path" in constraint:
+                path = Path(constraint["path"])
+
+                if root_dir:
+                    is_file = root_dir.joinpath(path).is_file()
                 else:
-                    collected.constraints[name] = Constraint.from_ireq(ireq)
-            else:
-                req = self._make_requirement_from_install_req(
-                    ireq,
-                    requested_extras=(),
+                    is_file = path.is_file()
+
+                if is_file:
+                    dependency = FileDependency(
+                        name,
+                        path,
+                        directory=constraint.get("subdirectory", None),
+                        groups=groups,
+                        optional=optional,
+                        base=root_dir,
+                        extras=constraint.get("extras", []),
+                    )
+                else:
+                    subdirectory = constraint.get("subdirectory", None)
+                    if subdirectory:
+                        path = path / subdirectory
+                    dependency = DirectoryDependency(
+                        name,
+                        path,
+                        groups=groups,
+                        optional=optional,
+                        base=root_dir,
+                        develop=constraint.get("develop", False),
+                        extras=constraint.get("extras", []),
+                    )
+            elif "url" in constraint:
+                dependency = URLDependency(
+                    name,
+                    constraint["url"],
+                    directory=constraint.get("subdirectory", None),
+                    groups=groups,
+                    optional=optional,
+                    extras=constraint.get("extras", []),
                 )
-                if req is None:
-                    continue
-                if ireq.user_supplied and req.name not in collected.user_requested:
-                    collected.user_requested[req.name] = i
-                collected.requirements.append(req)
-        return collected
+            else:
+                version = constraint.get("version", "*")
 
-    def make_requirement_from_candidate(
-        self, candidate: Candidate
-    ) -> ExplicitRequirement:
-        return ExplicitRequirement(candidate)
+                dependency = Dependency(
+                    name,
+                    version,
+                    optional=optional,
+                    groups=groups,
+                    allows_prereleases=allows_prereleases,
+                    extras=constraint.get("extras", []),
+                )
+                # Normally not valid, but required for enriching [project] dependencies
+                dependency._develop = constraint.get("develop", False)
 
-    def make_requirement_from_spec(
-        self,
-        specifier: str,
-        comes_from: Optional[InstallRequirement],
-        requested_extras: Iterable[str] = (),
-    ) -> Optional[Requirement]:
-        ireq = self._make_install_req_from_spec(specifier, comes_from)
-        return self._make_requirement_from_install_req(ireq, requested_extras)
+            marker = parse_marker(markers) if markers else AnyMarker()
 
-    def make_requires_python_requirement(
-        self,
-        specifier: SpecifierSet,
-    ) -> Optional[Requirement]:
-        if self._ignore_requires_python:
-            return None
-        # Don't bother creating a dependency for an empty Requires-Python.
-        if not str(specifier):
-            return None
-        return RequiresPythonRequirement(specifier, self._python_candidate)
+            if python_versions:
+                marker = marker.intersect(
+                    parse_marker(
+                        create_nested_marker(
+                            "python_version", parse_version_constraint(python_versions)
+                        )
+                    )
+                )
 
-    def get_wheel_cache_entry(
-        self, link: Link, name: Optional[str]
-    ) -> Optional[CacheEntry]:
-        """Look up the link in the wheel cache.
+            if platform:
+                marker = marker.intersect(
+                    parse_marker(
+                        create_nested_marker(
+                            "sys_platform", parse_generic_constraint(platform)
+                        )
+                    )
+                )
 
-        If ``preparer.require_hashes`` is True, don't use the wheel cache,
-        because cached wheels, always built locally, have different hashes
-        than the files downloaded from the index server and thus throw false
-        hash mismatches. Furthermore, cached wheels at present have
-        nondeterministic contents due to file modification times.
+            if not marker.is_any():
+                dependency.marker = marker
+
+            dependency.source_name = constraint.get("source")
+        else:
+            dependency = Dependency(name, constraint, groups=groups)
+
+        return dependency
+
+    @classmethod
+    def validate(
+        cls, toml_data: dict[str, Any], strict: bool = False
+    ) -> dict[str, list[str]]:
         """
-        if self._wheel_cache is None or self.preparer.require_hashes:
-            return None
-        return self._wheel_cache.get_cache_entry(
-            link=link,
-            package_name=name,
-            supported_tags=get_supported(),
-        )
+        Checks the validity of a configuration
+        """
+        from poetry.core.json import validate_object
 
-    def get_dist_to_uninstall(self, candidate: Candidate) -> Optional[BaseDistribution]:
-        # TODO: Are there more cases this needs to return True? Editable?
-        dist = self._installed_dists.get(candidate.project_name)
-        if dist is None:  # Not installed, no uninstallation required.
-            return None
+        result: dict[str, list[str]] = {"errors": [], "warnings": []}
 
-        # We're installing into global site. The current installation must
-        # be uninstalled, no matter it's in global or user site, because the
-        # user site installation has precedence over global.
-        if not self._use_user_site:
-            return dist
-
-        # We're installing into user site. Remove the user site installation.
-        if dist.in_usersite:
-            return dist
-
-        # We're installing into user site, but the installed incompatible
-        # package is in global site. We can't uninstall that, and would let
-        # the new user installation to "shadow" it. But shadowing won't work
-        # in virtual environments, so we error out.
-        if running_under_virtualenv() and dist.in_site_packages:
-            message = (
-                f"Will not install to the user site because it will lack "
-                f"sys.path precedence to {dist.raw_name} in {dist.location}"
-            )
-            raise InstallationError(message)
-        return None
-
-    def _report_requires_python_error(
-        self, causes: Sequence["ConflictCause"]
-    ) -> UnsupportedPythonVersion:
-        assert causes, "Requires-Python error reported with no cause"
-
-        version = self._python_candidate.version
-
-        if len(causes) == 1:
-            specifier = str(causes[0].requirement.specifier)
-            message = (
-                f"Package {causes[0].parent.name!r} requires a different "
-                f"Python: {version} not in {specifier!r}"
-            )
-            return UnsupportedPythonVersion(message)
-
-        message = f"Packages require a different Python. {version} not in:"
-        for cause in causes:
-            package = cause.parent.format_for_error()
-            specifier = str(cause.requirement.specifier)
-            message += f"\n{specifier!r} (required by {package})"
-        return UnsupportedPythonVersion(message)
-
-    def _report_single_requirement_conflict(
-        self, req: Requirement, parent: Optional[Candidate]
-    ) -> DistributionNotFound:
-        if parent is None:
-            req_disp = str(req)
-        else:
-            req_disp = f"{req} (from {parent.name})"
-
-        cands = self._finder.find_all_candidates(req.project_name)
-        versions = [str(v) for v in sorted({c.version for c in cands})]
-
-        logger.critical(
-            "Could not find a version that satisfies the requirement %s "
-            "(from versions: %s)",
-            req_disp,
-            ", ".join(versions) or "none",
-        )
-        if str(req) == "requirements.txt":
-            logger.info(
-                "HINT: You are attempting to install a package literally "
-                'named "requirements.txt" (which cannot exist). Consider '
-                "using the '-r' flag to install the packages listed in "
-                "requirements.txt"
-            )
-
-        return DistributionNotFound(f"No matching distribution found for {req}")
-
-    def get_installation_error(
-        self,
-        e: "ResolutionImpossible[Requirement, Candidate]",
-        constraints: Dict[str, Constraint],
-    ) -> InstallationError:
-
-        assert e.causes, "Installation error reported with no cause"
-
-        # If one of the things we can't solve is "we need Python X.Y",
-        # that is what we report.
-        requires_python_causes = [
-            cause
-            for cause in e.causes
-            if isinstance(cause.requirement, RequiresPythonRequirement)
-            and not cause.requirement.is_satisfied_by(self._python_candidate)
+        # Validate against schemas
+        project = toml_data.get("project")
+        if project is not None:
+            project_validation_errors = [
+                e.replace("data", "project")
+                for e in validate_object(project, "project-schema")
+            ]
+            result["errors"] += project_validation_errors
+        # With PEP 621 [tool.poetry] is not mandatory anymore. We still create and
+        # validate it so that default values (e.g. for package-mode) are set.
+        tool_poetry = toml_data.setdefault("tool", {}).setdefault("poetry", {})
+        tool_poetry_validation_errors = [
+            e.replace("data.", "tool.poetry.")
+            for e in validate_object(tool_poetry, "poetry-schema")
         ]
-        if requires_python_causes:
-            # The comprehension above makes sure all Requirement instances are
-            # RequiresPythonRequirement, so let's cast for convenience.
-            return self._report_requires_python_error(
-                cast("Sequence[ConflictCause]", requires_python_causes),
+        result["errors"] += tool_poetry_validation_errors
+
+        dependency_groups = toml_data.get("dependency-groups")
+        if dependency_groups is not None:
+            dependency_groups_validation_errors = [
+                e.replace("data", "dependency-groups")
+                for e in validate_object(dependency_groups, "dependency-groups-schema")
+            ]
+            result["errors"] += dependency_groups_validation_errors
+
+        # Check for required fields if package mode.
+        # In non-package mode, there are no required fields.
+        package_mode = tool_poetry.get("package-mode", True)
+        if package_mode:
+            for key in ("name", "version"):
+                value = (project or {}).get(key) or tool_poetry.get(key)
+                if not value:
+                    result["errors"].append(
+                        f"Either [project.{key}] or [tool.poetry.{key}]"
+                        " is required in package mode."
+                    )
+
+        config = tool_poetry
+
+        if "dev-dependencies" in config:
+            result["warnings"].append(
+                'The "poetry.dev-dependencies" section is deprecated'
+                " and will be removed in a future version."
+                ' Use "poetry.group.dev.dependencies" instead.'
             )
 
-        # Otherwise, we have a set of causes which can't all be satisfied
-        # at once.
+        cls._validate_dependency_groups(toml_data, result)
 
-        # The simplest case is when we have *one* cause that can't be
-        # satisfied. We just report that case.
-        if len(e.causes) == 1:
-            req, parent = e.causes[0]
-            if req.name not in constraints:
-                return self._report_single_requirement_conflict(req, parent)
+        if strict:
+            # Validate [project] section
+            if project:
+                cls._validate_project(project, result)
 
-        # OK, we now have a list of requirements that can't all be
-        # satisfied at once.
+            # Validate relation between [project] and [tool.poetry]
+            cls._validate_legacy_vs_project(toml_data, result)
 
-        # A couple of formatting helpers
-        def text_join(parts: List[str]) -> str:
-            if len(parts) == 1:
-                return parts[0]
+            cls._validate_strict(config, result)
 
-            return ", ".join(parts[:-1]) + " and " + parts[-1]
+        return result
 
-        def describe_trigger(parent: Candidate) -> str:
-            ireq = parent.get_install_requirement()
-            if not ireq or not ireq.comes_from:
-                return f"{parent.name}=={parent.version}"
-            if isinstance(ireq.comes_from, InstallRequirement):
-                return str(ireq.comes_from.name)
-            return str(ireq.comes_from)
+    @classmethod
+    def _validate_dependency_groups(
+        cls, toml_data: dict[str, Any], result: dict[str, list[str]]
+    ) -> None:
+        """Ensure that there are no duplicated dependency groups
+        and that they do not include themselves."""
+        original_names = defaultdict(set)
+        group_includes: dict[NormalizedName, list[NormalizedName]] = {}
 
-        triggers = set()
-        for req, parent in e.causes:
-            if parent is None:
-                # This is a root requirement, so we can report it directly
-                trigger = req.format_for_error()
+        for group_name, dependencies in toml_data.get("dependency-groups", {}).items():
+            normalized_group_name = canonicalize_name(group_name)
+            original_names[normalized_group_name].add(group_name)
+            for constraint in dependencies:
+                if isinstance(constraint, dict) and (
+                    include := constraint.get("include-group")
+                ):
+                    group_includes.setdefault(normalized_group_name, []).append(
+                        canonicalize_name(include)
+                    )
+
+        poetry_config = toml_data.get("tool", {}).get("poetry", {})
+        for group_name, group_config in poetry_config.get("group", {}).items():
+            normalized_group_name = canonicalize_name(group_name)
+            original_names[normalized_group_name].add(group_name)
+            if include_groups := group_config.get("include-groups", []):
+                group_includes[normalized_group_name] = [
+                    canonicalize_name(name) for name in include_groups
+                ]
+
+        for normed_name, names in original_names.items():
+            if len(names) > 1:
+                result["errors"].append(
+                    "Duplicate dependency group name after normalization:"
+                    f" {normed_name} ({', '.join(sorted(names))})"
+                )
+
+        for root in group_includes:
+            # group, path to group, ancestors
+            stack: list[
+                tuple[NormalizedName, list[NormalizedName], set[NormalizedName]]
+            ] = [(root, [], {root})]
+            while stack:
+                group, path, ancestors = stack.pop()
+                for include in group_includes.get(group, []):
+                    new_path = [*path, include]
+                    if include in ancestors:
+                        result["errors"].append(
+                            f"Cyclic dependency group include in {root}:"
+                            f" {' -> '.join(new_path)}"
+                        )
+                    else:
+                        stack.append((include, new_path, ancestors | {include}))
+
+    @classmethod
+    def _validate_project(
+        cls, project: dict[str, Any], result: dict[str, list[str]]
+    ) -> None:
+        if (project_license := project.get("license")) is not None:
+            if isinstance(project_license, str):
+                try:
+                    canonicalize_license_expression(project_license)
+                except InvalidLicenseExpression:
+                    result["warnings"].append(
+                        "[project.license] is not a valid SPDX expression."
+                        " This is deprecated and will raise an error in the future."
+                    )
             else:
-                trigger = describe_trigger(parent)
-            triggers.add(trigger)
+                result["warnings"].append(
+                    "Defining [project.license] as a table is deprecated."
+                    " [project.license] should be a valid SPDX license expression."
+                    " License files can be referenced in [project.license-files]."
+                )
 
-        if triggers:
-            info = text_join(sorted(triggers))
+        for classifier in project.get("classifiers", []):
+            if classifier.startswith("License :: "):
+                result["warnings"].append(
+                    "License classifiers are deprecated. Use [project.license] instead."
+                )
+
+    @classmethod
+    def _validate_legacy_vs_project(
+        cls, toml_data: dict[str, Any], result: dict[str, list[str]]
+    ) -> None:
+        project = toml_data.get("project", {})
+        dynamic = project.get("dynamic", [])
+        tool_poetry = toml_data["tool"]["poetry"]
+
+        redundant_fields = [
+            # name, deprecated (if not dynamic), new name (or None if same as old)
+            ("name", True, None),
+            # version can be dynamically set via `build --local-version` or plugins
+            ("version", False, None),
+            ("description", True, None),
+            # multiple readmes are not supported in [project.readme]
+            ("readme", False, None),
+            ("license", True, None),
+            ("authors", True, None),
+            ("maintainers", True, None),
+            ("keywords", True, None),
+            # classifiers are enriched dynamically per default
+            ("classifiers", False, None),
+            ("homepage", True, "urls"),
+            ("repository", True, "urls"),
+            ("documentation", True, "urls"),
+            ("urls", True, "urls"),
+            ("plugins", True, "entry-points"),
+            ("extras", True, "optional-dependencies"),
+        ]
+        dynamic_information = {
+            "version": (
+                "If you want to set the version dynamically via"
+                " `poetry build --local-version` or you are using a plugin, which"
+                " sets the version dynamically, you should define the version in"
+                " [tool.poetry] and add 'version' to [project.dynamic]."
+            ),
+            "readme": (
+                "If you want to define multiple readmes, you should define them in"
+                " [tool.poetry] and add 'readme' to [project.dynamic]."
+            ),
+            "classifiers": (
+                "ATTENTION: Per default Poetry determines classifiers for supported"
+                " Python versions and license automatically. If you define classifiers"
+                " in [project], you disable the automatic enrichment. In other words,"
+                " you have to define all classifiers manually."
+                " If you want to use Poetry's automatic enrichment of classifiers,"
+                " you should define them in [tool.poetry] and add 'classifiers'"
+                " to [project.dynamic]."
+            ),
+        }
+        assert {f[0] for f in redundant_fields if not f[1]} == set(dynamic_information)
+
+        for name, deprecated, new_name in redundant_fields:
+            new_name = new_name or name
+            if name in tool_poetry:
+                warning = ""
+                if new_name in project:
+                    warning = (
+                        f"[project.{new_name}] and [tool.poetry.{name}] are both set."
+                        " The latter will be ignored."
+                    )
+                elif deprecated:
+                    warning = (
+                        f"[tool.poetry.{name}] is deprecated."
+                        f" Use [project.{new_name}] instead."
+                    )
+                elif new_name not in dynamic:
+                    warning = (
+                        f"[tool.poetry.{name}] is set but '{new_name}' is not in"
+                        f" [project.dynamic]. If it is static use [project.{new_name}]."
+                        f" If it is dynamic, add '{new_name}' to [project.dynamic]."
+                    )
+                if warning:
+                    if additional_info := dynamic_information.get(name):
+                        warning += f"\n{additional_info}"
+                    result["warnings"].append(warning)
+
+        # scripts are special because entry-points are deprecated
+        # but files are not because there is no equivalent in [project]
+        if scripts := tool_poetry.get("scripts"):
+            for __, script in scripts.items():
+                if not isinstance(script, dict) or script.get("type") != "file":
+                    if "scripts" in project:
+                        warning = (
+                            "[project.scripts] is set and there are console scripts in"
+                            " [tool.poetry.scripts]. The latter will be ignored."
+                        )
+                    else:
+                        warning = (
+                            "Defining console scripts in [tool.poetry.scripts] is"
+                            " deprecated. Use [project.scripts] instead."
+                            " ([tool.poetry.scripts] should only be used for scripts"
+                            " of type 'file')."
+                        )
+                    result["warnings"].append(warning)
+                    break
+
+        # dependencies are special because we consider
+        # [project.dependencies] as abstract dependencies for building
+        # and [tool.poetry.dependencies] as the concrete dependencies for locking
+        if (
+            "dependencies" in tool_poetry
+            and "project" in toml_data
+            and "dependencies" not in project
+            and "dependencies" not in project.get("dynamic", [])
+        ):
+            result["warnings"].append(
+                "[tool.poetry.dependencies] is set but [project.dependencies] is not"
+                " and 'dependencies' is not in [project.dynamic]."
+                " You should either migrate [tool.poetry.dependencies] to"
+                " [project.dependencies] (if you do not need Poetry-specific features)"
+                " or add [project.dependencies] in addition to"
+                " [tool.poetry.dependencies] or add 'dependencies' to"
+                " [project.dynamic]."
+            )
+
+        # requires-python in [project] and python in [tool.poetry.dependencies] are
+        # special because we consider requires-python as abstract python version
+        # for building and python as concrete python version for locking
+        if (
+            "python" in tool_poetry.get("dependencies", {})
+            and "project" in toml_data
+            and "requires-python" not in project
+            and "requires-python" not in project.get("dynamic", [])
+        ):
+            result["warnings"].append(
+                "[tool.poetry.dependencies.python] is set but [project.requires-python]"
+                " is not set and 'requires-python' is not in [project.dynamic]."
+            )
+
+    @classmethod
+    def _validate_strict(
+        cls, config: dict[str, Any], result: dict[str, list[str]]
+    ) -> None:
+        for classifier in config.get("classifiers", []):
+            if classifier.startswith("License :: "):
+                result["warnings"].append(
+                    "License classifiers are deprecated. Use [project.license] instead."
+                )
+
+        if "dependencies" in config:
+            python_versions = config["dependencies"].get("python")
+            if python_versions == "*":
+                result["warnings"].append(
+                    "A wildcard Python dependency is ambiguous. "
+                    "Consider specifying a more explicit one."
+                )
+
+            for name, constraint in config["dependencies"].items():
+                if not isinstance(constraint, dict):
+                    continue
+
+                if "allows-prereleases" in constraint:
+                    result["warnings"].append(
+                        f'The "{name}" dependency specifies '
+                        'the "allows-prereleases" property, which is deprecated. '
+                        'Use "allow-prereleases" instead.'
+                    )
+
+        if "extras" in config:
+            for extra_name, requirements in config["extras"].items():
+                extra_name = canonicalize_name(extra_name)
+
+                for req in requirements:
+                    req_name = canonicalize_name(req)
+                    for dependency in config.get("dependencies", {}):
+                        dep_name = canonicalize_name(dependency)
+                        if req_name == dep_name:
+                            break
+                    else:
+                        result["errors"].append(
+                            f'Cannot find dependency "{req}" for extra '
+                            f'"{extra_name}" in main dependencies.'
+                        )
+
+        # Checking for scripts with extras
+        if "scripts" in config:
+            scripts = config["scripts"]
+            config_extras = config.get("extras", {})
+
+            for name, script in scripts.items():
+                if not isinstance(script, dict):
+                    continue
+
+                extras = script.get("extras", [])
+                if extras:
+                    result["warnings"].append(
+                        f'The script "{name}" depends on an extra. Scripts'
+                        " depending on extras are deprecated and support for them"
+                        " will be removed in a future version of"
+                        " poetry/poetry-core. See"
+                        " https://packaging.python.org/en/latest/specifications/entry-points/#data-model"
+                        " for details."
+                    )
+                for extra in extras:
+                    if extra not in config_extras:
+                        result["errors"].append(
+                            f'The script "{name}" requires extra "{extra}"'
+                            " which is not defined."
+                        )
+
+        # Checking types of all readme files (must match)
+        if "readme" in config and not isinstance(config["readme"], str):
+            readme_types = {readme_content_type(r) for r in config["readme"]}
+            if len(readme_types) > 1:
+                result["errors"].append(
+                    "Declared README files must be of same type: found"
+                    f" {', '.join(sorted(readme_types))}"
+                )
+
+    @classmethod
+    def locate(cls, cwd: Path | None = None) -> Path:
+        cwd = Path(cwd or Path.cwd())
+        candidates = [cwd]
+        candidates.extend(cwd.parents)
+
+        for path in candidates:
+            poetry_file = path / "pyproject.toml"
+
+            if poetry_file.exists():
+                return poetry_file
+
         else:
-            info = "the requested packages"
-
-        msg = (
-            "Cannot install {} because these package versions "
-            "have conflicting dependencies.".format(info)
-        )
-        logger.critical(msg)
-        msg = "\nThe conflict is caused by:"
-
-        relevant_constraints = set()
-        for req, parent in e.causes:
-            if req.name in constraints:
-                relevant_constraints.add(req.name)
-            msg = msg + "\n    "
-            if parent:
-                msg = msg + f"{parent.name} {parent.version} depends on "
-            else:
-                msg = msg + "The user requested "
-            msg = msg + req.format_for_error()
-        for key in relevant_constraints:
-            spec = constraints[key].specifier
-            msg += f"\n    The user requested (constraint) {key}{spec}"
-
-        msg = (
-            msg
-            + "\n\n"
-            + "To fix this you could try to:\n"
-            + "1. loosen the range of package versions you've specified\n"
-            + "2. remove package versions to allow pip attempt to solve "
-            + "the dependency conflict\n"
-        )
-
-        logger.info(msg)
-
-        return DistributionNotFound(
-            "ResolutionImpossible: for help visit "
-            "https://pip.pypa.io/en/latest/topics/dependency-resolution/"
-            "#dealing-with-dependency-conflicts"
-        )
+            raise RuntimeError(
+                f"Poetry could not find a pyproject.toml file in {cwd} or its parents"
+            )

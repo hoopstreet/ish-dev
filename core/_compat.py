@@ -1,38 +1,56 @@
-# This file is dual licensed under the terms of the Apache License, Version
-# 2.0, and the BSD License. See the LICENSE file in the root of this repository
-# for complete details.
-from __future__ import absolute_import, division, print_function
-
+import platform
 import sys
 
-from ._typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover
-    from typing import Any, Dict, Tuple, Type
+__all__ = ['install', 'NullFinder']
 
 
-PY2 = sys.version_info[0] == 2
-PY3 = sys.version_info[0] == 3
-
-# flake8: noqa
-
-if PY3:
-    string_types = (str,)
-else:
-    string_types = (basestring,)
-
-
-def with_metaclass(meta, *bases):
-    # type: (Type[Any], Tuple[Type[Any], ...]) -> Any
+def install(cls):
     """
-    Create a base class with a metaclass.
-    """
-    # This requires a bit of explanation: the basic idea is to make a dummy
-    # metaclass for one level of class instantiation that replaces itself with
-    # the actual metaclass.
-    class metaclass(meta):  # type: ignore
-        def __new__(cls, name, this_bases, d):
-            # type: (Type[Any], str, Tuple[Any], Dict[Any, Any]) -> Any
-            return meta(name, bases, d)
+    Class decorator for installation on sys.meta_path.
 
-    return type.__new__(metaclass, "temporary_class", (), {})
+    Adds the backport DistributionFinder to sys.meta_path and
+    attempts to disable the finder functionality of the stdlib
+    DistributionFinder.
+    """
+    sys.meta_path.append(cls())
+    disable_stdlib_finder()
+    return cls
+
+
+def disable_stdlib_finder():
+    """
+    Give the backport primacy for discovering path-based distributions
+    by monkey-patching the stdlib O_O.
+
+    See #91 for more background for rationale on this sketchy
+    behavior.
+    """
+
+    def matches(finder):
+        return getattr(
+            finder, '__module__', None
+        ) == '_frozen_importlib_external' and hasattr(finder, 'find_distributions')
+
+    for finder in filter(matches, sys.meta_path):  # pragma: nocover
+        del finder.find_distributions
+
+
+class NullFinder:
+    """
+    A "Finder" (aka "MetaPathFinder") that never finds any modules,
+    but may find distributions.
+    """
+
+    @staticmethod
+    def find_spec(*args, **kwargs):
+        return None
+
+
+def pypy_partial(val):
+    """
+    Adjust for variable stacklevel on partial under PyPy.
+
+    Workaround for #327.
+    """
+    is_pypy = platform.python_implementation() == 'PyPy'
+    return val + is_pypy

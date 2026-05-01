@@ -1,6 +1,21 @@
-if __name__ == "__main__":  # pragma: no cover
-    from pip._vendor.rich.console import Console
-    from pip._vendor.rich import inspect
+import sys
 
-    console = Console()
-    inspect(console)
+from . import Distribution
+
+
+def inspect(path):
+    print("Inspecting", path)
+    dists = list(Distribution.discover(path=[path]))
+    if not dists:
+        return
+    print("Found", len(dists), "packages:", end=' ')
+    print(', '.join(dist.name for dist in dists))
+
+
+def run():
+    for path in sys.path:
+        inspect(path)
+
+
+if __name__ == '__main__':
+    run()

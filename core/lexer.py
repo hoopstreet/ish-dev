@@ -1,879 +1,678 @@
-"""
-    pygments.lexer
-    ~~~~~~~~~~~~~~
+# Lexer Implementation
 
-    Base lexer classes.
-
-    :copyright: Copyright 2006-2021 by the Pygments team, see AUTHORS.
-    :license: BSD, see LICENSE for details.
-"""
-
+from abc import abstractmethod, ABC
 import re
-import sys
-import time
-
-from pip._vendor.pygments.filter import apply_filters, Filter
-from pip._vendor.pygments.filters import get_filter_by_name
-from pip._vendor.pygments.token import Error, Text, Other, _TokenType
-from pip._vendor.pygments.util import get_bool_opt, get_int_opt, get_list_opt, \
-    make_analysator, Future, guess_decode
-from pip._vendor.pygments.regexopt import regex_opt
-
-__all__ = ['Lexer', 'RegexLexer', 'ExtendedRegexLexer', 'DelegatingLexer',
-           'LexerContext', 'include', 'inherit', 'bygroups', 'using', 'this',
-           'default', 'words']
-
-
-_encoding_map = [(b'\xef\xbb\xbf', 'utf-8'),
-                 (b'\xff\xfe\0\0', 'utf-32'),
-                 (b'\0\0\xfe\xff', 'utf-32be'),
-                 (b'\xff\xfe', 'utf-16'),
-                 (b'\xfe\xff', 'utf-16be')]
-
-_default_analyse = staticmethod(lambda x: 0.0)
-
-
-class LexerMeta(type):
-    """
-    This metaclass automagically converts ``analyse_text`` methods into
-    static methods which always return float values.
-    """
-
-    def __new__(mcs, name, bases, d):
-        if 'analyse_text' in d:
-            d['analyse_text'] = make_analysator(d['analyse_text'])
-        return type.__new__(mcs, name, bases, d)
-
-
-class Lexer(metaclass=LexerMeta):
-    """
-    Lexer for a specific language.
-
-    Basic options recognized:
-    ``stripnl``
-        Strip leading and trailing newlines from the input (default: True).
-    ``stripall``
-        Strip all leading and trailing whitespace from the input
-        (default: False).
-    ``ensurenl``
-        Make sure that the input ends with a newline (default: True).  This
-        is required for some lexers that consume input linewise.
-
-        .. versionadded:: 1.3
-
-    ``tabsize``
-        If given and greater than 0, expand tabs in the input (default: 0).
-    ``encoding``
-        If given, must be an encoding name. This encoding will be used to
-        convert the input string to Unicode, if it is not already a Unicode
-        string (default: ``'guess'``, which uses a simple UTF-8 / Locale /
-        Latin1 detection.  Can also be ``'chardet'`` to use the chardet
-        library, if it is installed.
-    ``inencoding``
-        Overrides the ``encoding`` if given.
-    """
-
-    #: Name of the lexer
-    name = None
-
-    #: Shortcuts for the lexer
-    aliases = []
-
-    #: File name globs
-    filenames = []
-
-    #: Secondary file name globs
-    alias_filenames = []
-
-    #: MIME types
-    mimetypes = []
-
-    #: Priority, should multiple lexers match and no content is provided
-    priority = 0
-
-    def __init__(self, **options):
-        self.options = options
-        self.stripnl = get_bool_opt(options, 'stripnl', True)
-        self.stripall = get_bool_opt(options, 'stripall', False)
-        self.ensurenl = get_bool_opt(options, 'ensurenl', True)
-        self.tabsize = get_int_opt(options, 'tabsize', 0)
-        self.encoding = options.get('encoding', 'guess')
-        self.encoding = options.get('inencoding') or self.encoding
-        self.filters = []
-        for filter_ in get_list_opt(options, 'filters', ()):
-            self.add_filter(filter_)
-
-    def __repr__(self):
-        if self.options:
-            return '<pygments.lexers.%s with %r>' % (self.__class__.__name__,
-                                                     self.options)
-        else:
-            return '<pygments.lexers.%s>' % self.__class__.__name__
-
-    def add_filter(self, filter_, **options):
-        """
-        Add a new stream filter to this lexer.
-        """
-        if not isinstance(filter_, Filter):
-            filter_ = get_filter_by_name(filter_, **options)
-        self.filters.append(filter_)
-
-    def analyse_text(text):
-        """
-        Has to return a float between ``0`` and ``1`` that indicates
-        if a lexer wants to highlight this text. Used by ``guess_lexer``.
-        If this method returns ``0`` it won't highlight it in any case, if
-        it returns ``1`` highlighting with this lexer is guaranteed.
-
-        The `LexerMeta` metaclass automatically wraps this function so
-        that it works like a static method (no ``self`` or ``cls``
-        parameter) and the return value is automatically converted to
-        `float`. If the return value is an object that is boolean `False`
-        it's the same as if the return values was ``0.0``.
-        """
-
-    def get_tokens(self, text, unfiltered=False):
-        """
-        Return an iterable of (tokentype, value) pairs generated from
-        `text`. If `unfiltered` is set to `True`, the filtering mechanism
-        is bypassed even if filters are defined.
-
-        Also preprocess the text, i.e. expand tabs and strip it if
-        wanted and applies registered filters.
-        """
-        if not isinstance(text, str):
-            if self.encoding == 'guess':
-                text, _ = guess_decode(text)
-            elif self.encoding == 'chardet':
-                try:
-                    from pip._vendor import chardet
-                except ImportError as e:
-                    raise ImportError('To enable chardet encoding guessing, '
-                                      'please install the chardet library '
-                                      'from http://chardet.feedparser.org/') from e
-                # check for BOM first
-                decoded = None
-                for bom, encoding in _encoding_map:
-                    if text.startswith(bom):
-                        decoded = text[len(bom):].decode(encoding, 'replace')
-                        break
-                # no BOM found, so use chardet
-                if decoded is None:
-                    enc = chardet.detect(text[:1024])  # Guess using first 1KB
-                    decoded = text.decode(enc.get('encoding') or 'utf-8',
-                                          'replace')
-                text = decoded
-            else:
-                text = text.decode(self.encoding)
-                if text.startswith('\ufeff'):
-                    text = text[len('\ufeff'):]
-        else:
-            if text.startswith('\ufeff'):
-                text = text[len('\ufeff'):]
-
-        # text now *is* a unicode string
-        text = text.replace('\r\n', '\n')
-        text = text.replace('\r', '\n')
-        if self.stripall:
-            text = text.strip()
-        elif self.stripnl:
-            text = text.strip('\n')
-        if self.tabsize > 0:
-            text = text.expandtabs(self.tabsize)
-        if self.ensurenl and not text.endswith('\n'):
-            text += '\n'
-
-        def streamer():
-            for _, t, v in self.get_tokens_unprocessed(text):
-                yield t, v
-        stream = streamer()
-        if not unfiltered:
-            stream = apply_filters(stream, self.filters, self)
-        return stream
-
-    def get_tokens_unprocessed(self, text):
-        """
-        Return an iterable of (index, tokentype, value) pairs where "index"
-        is the starting position of the token within the input text.
-
-        In subclasses, implement this method as a generator to
-        maximize effectiveness.
-        """
-        raise NotImplementedError
-
-
-class DelegatingLexer(Lexer):
-    """
-    This lexer takes two lexer as arguments. A root lexer and
-    a language lexer. First everything is scanned using the language
-    lexer, afterwards all ``Other`` tokens are lexed using the root
-    lexer.
-
-    The lexers from the ``template`` lexer package use this base lexer.
-    """
-
-    def __init__(self, _root_lexer, _language_lexer, _needle=Other, **options):
-        self.root_lexer = _root_lexer(**options)
-        self.language_lexer = _language_lexer(**options)
-        self.needle = _needle
-        Lexer.__init__(self, **options)
-
-    def get_tokens_unprocessed(self, text):
-        buffered = ''
-        insertions = []
-        lng_buffer = []
-        for i, t, v in self.language_lexer.get_tokens_unprocessed(text):
-            if t is self.needle:
-                if lng_buffer:
-                    insertions.append((len(buffered), lng_buffer))
-                    lng_buffer = []
-                buffered += v
-            else:
-                lng_buffer.append((i, t, v))
-        if lng_buffer:
-            insertions.append((len(buffered), lng_buffer))
-        return do_insertions(insertions,
-                             self.root_lexer.get_tokens_unprocessed(buffered))
-
-
-# ------------------------------------------------------------------------------
-# RegexLexer and ExtendedRegexLexer
-#
-
-
-class include(str):  # pylint: disable=invalid-name
-    """
-    Indicates that a state should include rules from another state.
-    """
+from contextlib import suppress
+from typing import (
+    TypeVar, Type, Dict, Iterator, Collection, Callable, Optional, FrozenSet, Any,
+    ClassVar, TYPE_CHECKING, overload
+)
+from types import ModuleType
+import warnings
+try:
+    import interegular
+except ImportError:
     pass
+if TYPE_CHECKING:
+    from .common import LexerConf
+    from .parsers.lalr_parser_state import ParserState
+
+from .utils import classify, get_regexp_width, Serialize, logger
+from .exceptions import UnexpectedCharacters, LexError, UnexpectedToken
+from .grammar import TOKEN_DEFAULT_PRIORITY
 
 
-class _inherit:
-    """
-    Indicates the a state should inherit from its superclass.
-    """
+###{standalone
+from copy import copy
+
+try:  # For the standalone parser, we need to make sure that has_interegular is False to avoid NameErrors later on
+    has_interegular = bool(interegular)
+except NameError:
+    has_interegular = False
+
+class Pattern(Serialize, ABC):
+    "An abstraction over regular expressions."
+
+    value: str
+    flags: Collection[str]
+    raw: Optional[str]
+    type: ClassVar[str]
+
+    def __init__(self, value: str, flags: Collection[str] = (), raw: Optional[str] = None) -> None:
+        self.value = value
+        self.flags = frozenset(flags)
+        self.raw = raw
+
     def __repr__(self):
-        return 'inherit'
+        return repr(self.to_regexp())
 
-inherit = _inherit()  # pylint: disable=invalid-name
+    # Pattern Hashing assumes all subclasses have a different priority!
+    def __hash__(self):
+        return hash((type(self), self.value, self.flags))
 
+    def __eq__(self, other):
+        return type(self) == type(other) and self.value == other.value and self.flags == other.flags
 
-class combined(tuple):  # pylint: disable=invalid-name
-    """
-    Indicates a state combined from multiple states.
-    """
+    @abstractmethod
+    def to_regexp(self) -> str:
+        raise NotImplementedError()
 
-    def __new__(cls, *args):
-        return tuple.__new__(cls, args)
+    @property
+    @abstractmethod
+    def min_width(self) -> int:
+        raise NotImplementedError()
 
-    def __init__(self, *args):
-        # tuple.__init__ doesn't do anything
-        pass
+    @property
+    @abstractmethod
+    def max_width(self) -> int:
+        raise NotImplementedError()
 
-
-class _PseudoMatch:
-    """
-    A pseudo match object constructed from a string.
-    """
-
-    def __init__(self, start, text):
-        self._text = text
-        self._start = start
-
-    def start(self, arg=None):
-        return self._start
-
-    def end(self, arg=None):
-        return self._start + len(self._text)
-
-    def group(self, arg=None):
-        if arg:
-            raise IndexError('No such group')
-        return self._text
-
-    def groups(self):
-        return (self._text,)
-
-    def groupdict(self):
-        return {}
+    def _get_flags(self, value):
+        for f in self.flags:
+            value = ('(?%s:%s)' % (f, value))
+        return value
 
 
-def bygroups(*args):
-    """
-    Callback that yields multiple actions for each group in the match.
-    """
-    def callback(lexer, match, ctx=None):
-        for i, action in enumerate(args):
-            if action is None:
-                continue
-            elif type(action) is _TokenType:
-                data = match.group(i + 1)
-                if data:
-                    yield match.start(i + 1), action, data
-            else:
-                data = match.group(i + 1)
-                if data is not None:
-                    if ctx:
-                        ctx.pos = match.start(i + 1)
-                    for item in action(lexer,
-                                       _PseudoMatch(match.start(i + 1), data), ctx):
-                        if item:
-                            yield item
-        if ctx:
-            ctx.pos = match.end()
-    return callback
+class PatternStr(Pattern):
+    __serialize_fields__ = 'value', 'flags', 'raw'
+
+    type: ClassVar[str] = "str"
+
+    def to_regexp(self) -> str:
+        return self._get_flags(re.escape(self.value))
+
+    @property
+    def min_width(self) -> int:
+        return len(self.value)
+
+    @property
+    def max_width(self) -> int:
+        return len(self.value)
 
 
-class _This:
-    """
-    Special singleton used for indicating the caller class.
-    Used by ``using``.
-    """
+class PatternRE(Pattern):
+    __serialize_fields__ = 'value', 'flags', 'raw', '_width'
 
-this = _This()
+    type: ClassVar[str] = "re"
+
+    def to_regexp(self) -> str:
+        return self._get_flags(self.value)
+
+    _width = None
+    def _get_width(self):
+        if self._width is None:
+            self._width = get_regexp_width(self.to_regexp())
+        return self._width
+
+    @property
+    def min_width(self) -> int:
+        return self._get_width()[0]
+
+    @property
+    def max_width(self) -> int:
+        return self._get_width()[1]
 
 
-def using(_other, **kwargs):
-    """
-    Callback that processes the match with a different lexer.
+class TerminalDef(Serialize):
+    "A definition of a terminal"
+    __serialize_fields__ = 'name', 'pattern', 'priority'
+    __serialize_namespace__ = PatternStr, PatternRE
 
-    The keyword arguments are forwarded to the lexer, except `state` which
-    is handled separately.
+    name: str
+    pattern: Pattern
+    priority: int
 
-    `state` specifies the state that the new lexer will start in, and can
-    be an enumerable such as ('root', 'inline', 'string') or a simple
-    string which is assumed to be on top of the root state.
+    def __init__(self, name: str, pattern: Pattern, priority: int = TOKEN_DEFAULT_PRIORITY) -> None:
+        assert isinstance(pattern, Pattern), pattern
+        self.name = name
+        self.pattern = pattern
+        self.priority = priority
 
-    Note: For that to work, `_other` must not be an `ExtendedRegexLexer`.
-    """
-    gt_kwargs = {}
-    if 'state' in kwargs:
-        s = kwargs.pop('state')
-        if isinstance(s, (list, tuple)):
-            gt_kwargs['stack'] = s
+    def __repr__(self):
+        return '%s(%r, %r)' % (type(self).__name__, self.name, self.pattern)
+
+    def user_repr(self) -> str:
+        if self.name.startswith('__'):  # We represent a generated terminal
+            return self.pattern.raw or self.name
         else:
-            gt_kwargs['stack'] = ('root', s)
+            return self.name
 
-    if _other is this:
-        def callback(lexer, match, ctx=None):
-            # if keyword arguments are given the callback
-            # function has to create a new lexer instance
-            if kwargs:
-                # XXX: cache that somehow
-                kwargs.update(lexer.options)
-                lx = lexer.__class__(**kwargs)
-            else:
-                lx = lexer
-            s = match.start()
-            for i, t, v in lx.get_tokens_unprocessed(match.group(), **gt_kwargs):
-                yield i + s, t, v
-            if ctx:
-                ctx.pos = match.end()
-    else:
-        def callback(lexer, match, ctx=None):
-            # XXX: cache that somehow
-            kwargs.update(lexer.options)
-            lx = _other(**kwargs)
+_T = TypeVar('_T', bound="Token")
 
-            s = match.start()
-            for i, t, v in lx.get_tokens_unprocessed(match.group(), **gt_kwargs):
-                yield i + s, t, v
-            if ctx:
-                ctx.pos = match.end()
-    return callback
+class Token(str):
+    """A string with meta-information, that is produced by the lexer.
 
+    When parsing text, the resulting chunks of the input that haven't been discarded,
+    will end up in the tree as Token instances. The Token class inherits from Python's ``str``,
+    so normal string comparisons and operations will work as expected.
 
-class default:
+    Attributes:
+        type: Name of the token (as specified in grammar)
+        value: Value of the token (redundant, as ``token.value == token`` will always be true)
+        start_pos: The index of the token in the text
+        line: The line of the token in the text (starting with 1)
+        column: The column of the token in the text (starting with 1)
+        end_line: The line where the token ends
+        end_column: The next column after the end of the token. For example,
+            if the token is a single character with a column value of 4,
+            end_column will be 5.
+        end_pos: the index where the token ends (basically ``start_pos + len(token)``)
     """
-    Indicates a state or state action (e.g. #pop) to apply.
-    For example default('#pop') is equivalent to ('', Token, '#pop')
-    Note that state tuples may be used as well.
+    __slots__ = ('type', 'start_pos', 'value', 'line', 'column', 'end_line', 'end_column', 'end_pos')
 
-    .. versionadded:: 2.0
-    """
-    def __init__(self, state):
-        self.state = state
+    __match_args__ = ('type', 'value')
 
-
-class words(Future):
-    """
-    Indicates a list of literal words that is transformed into an optimized
-    regex that matches any of the words.
-
-    .. versionadded:: 2.0
-    """
-    def __init__(self, words, prefix='', suffix=''):
-        self.words = words
-        self.prefix = prefix
-        self.suffix = suffix
-
-    def get(self):
-        return regex_opt(self.words, prefix=self.prefix, suffix=self.suffix)
+    type: str
+    start_pos: Optional[int]
+    value: Any
+    line: Optional[int]
+    column: Optional[int]
+    end_line: Optional[int]
+    end_column: Optional[int]
+    end_pos: Optional[int]
 
 
-class RegexLexerMeta(LexerMeta):
-    """
-    Metaclass for RegexLexer, creates the self._tokens attribute from
-    self.tokens on the first instantiation.
-    """
+    @overload
+    def __new__(
+            cls,
+            type: str,
+            value: Any,
+            start_pos: Optional[int] = None,
+            line: Optional[int] = None,
+            column: Optional[int] = None,
+            end_line: Optional[int] = None,
+            end_column: Optional[int] = None,
+            end_pos: Optional[int] = None
+    ) -> 'Token':
+        ...
 
-    def _process_regex(cls, regex, rflags, state):
-        """Preprocess the regular expression component of a token definition."""
-        if isinstance(regex, Future):
-            regex = regex.get()
-        return re.compile(regex, rflags).match
+    @overload
+    def __new__(
+            cls,
+            type_: str,
+            value: Any,
+            start_pos: Optional[int] = None,
+            line: Optional[int] = None,
+            column: Optional[int] = None,
+            end_line: Optional[int] = None,
+            end_column: Optional[int] = None,
+            end_pos: Optional[int] = None
+    ) -> 'Token':        ...
 
-    def _process_token(cls, token):
-        """Preprocess the token component of a token definition."""
-        assert type(token) is _TokenType or callable(token), \
-            'token type must be simple type or callable, not %r' % (token,)
-        return token
+    def __new__(cls, *args, **kwargs):
+        if "type_" in kwargs:
+            warnings.warn("`type_` is deprecated use `type` instead", DeprecationWarning)
 
-    def _process_new_state(cls, new_state, unprocessed, processed):
-        """Preprocess the state transition action of a token definition."""
-        if isinstance(new_state, str):
-            # an existing state
-            if new_state == '#pop':
-                return -1
-            elif new_state in unprocessed:
-                return (new_state,)
-            elif new_state == '#push':
-                return new_state
-            elif new_state[:5] == '#pop:':
-                return -int(new_state[5:])
-            else:
-                assert False, 'unknown new state %r' % new_state
-        elif isinstance(new_state, combined):
-            # combine a new state from existing ones
-            tmp_state = '_tmp_%d' % cls._tmpname
-            cls._tmpname += 1
-            itokens = []
-            for istate in new_state:
-                assert istate != new_state, 'circular state ref %r' % istate
-                itokens.extend(cls._process_state(unprocessed,
-                                                  processed, istate))
-            processed[tmp_state] = itokens
-            return (tmp_state,)
-        elif isinstance(new_state, tuple):
-            # push more than one state
-            for istate in new_state:
-                assert (istate in unprocessed or
-                        istate in ('#pop', '#push')), \
-                    'unknown new state ' + istate
-            return new_state
-        else:
-            assert False, 'unknown new state def %r' % new_state
+            if "type" in kwargs:
+                raise TypeError("Error: using both 'type' and the deprecated 'type_' as arguments.")
+            kwargs["type"] = kwargs.pop("type_")
 
-    def _process_state(cls, unprocessed, processed, state):
-        """Preprocess a single state definition."""
-        assert type(state) is str, "wrong state name %r" % state
-        assert state[0] != '#', "invalid state name %r" % state
-        if state in processed:
-            return processed[state]
-        tokens = processed[state] = []
-        rflags = cls.flags
-        for tdef in unprocessed[state]:
-            if isinstance(tdef, include):
-                # it's a state reference
-                assert tdef != state, "circular state reference %r" % state
-                tokens.extend(cls._process_state(unprocessed, processed,
-                                                 str(tdef)))
+        return cls._future_new(*args, **kwargs)
+
+
+    @classmethod
+    def _future_new(cls, type, value, start_pos=None, line=None, column=None, end_line=None, end_column=None, end_pos=None):
+        inst = super(Token, cls).__new__(cls, value)
+
+        inst.type = type
+        inst.start_pos = start_pos
+        inst.value = value
+        inst.line = line
+        inst.column = column
+        inst.end_line = end_line
+        inst.end_column = end_column
+        inst.end_pos = end_pos
+        return inst
+
+    @overload
+    def update(self, type: Optional[str] = None, value: Optional[Any] = None) -> 'Token':
+        ...
+
+    @overload
+    def update(self, type_: Optional[str] = None, value: Optional[Any] = None) -> 'Token':
+        ...
+
+    def update(self, *args, **kwargs):
+        if "type_" in kwargs:
+            warnings.warn("`type_` is deprecated use `type` instead", DeprecationWarning)
+
+            if "type" in kwargs:
+                raise TypeError("Error: using both 'type' and the deprecated 'type_' as arguments.")
+            kwargs["type"] = kwargs.pop("type_")
+
+        return self._future_update(*args, **kwargs)
+
+    def _future_update(self, type: Optional[str] = None, value: Optional[Any] = None) -> 'Token':
+        return Token.new_borrow_pos(
+            type if type is not None else self.type,
+            value if value is not None else self.value,
+            self
+        )
+
+    @classmethod
+    def new_borrow_pos(cls: Type[_T], type_: str, value: Any, borrow_t: 'Token') -> _T:
+        return cls(type_, value, borrow_t.start_pos, borrow_t.line, borrow_t.column, borrow_t.end_line, borrow_t.end_column, borrow_t.end_pos)
+
+    def __reduce__(self):
+        return (self.__class__, (self.type, self.value, self.start_pos, self.line, self.column))
+
+    def __repr__(self):
+        return 'Token(%r, %r)' % (self.type, self.value)
+
+    def __deepcopy__(self, memo):
+        return Token(self.type, self.value, self.start_pos, self.line, self.column)
+
+    def __eq__(self, other):
+        if isinstance(other, Token) and self.type != other.type:
+            return False
+
+        return str.__eq__(self, other)
+
+    __hash__ = str.__hash__
+
+
+class LineCounter:
+    "A utility class for keeping track of line & column information"
+
+    __slots__ = 'char_pos', 'line', 'column', 'line_start_pos', 'newline_char'
+
+    def __init__(self, newline_char):
+        self.newline_char = newline_char
+        self.char_pos = 0
+        self.line = 1
+        self.column = 1
+        self.line_start_pos = 0
+
+    def __eq__(self, other):
+        if not isinstance(other, LineCounter):
+            return NotImplemented
+
+        return self.char_pos == other.char_pos and self.newline_char == other.newline_char
+
+    def feed(self, token: Token, test_newline=True):
+        """Consume a token and calculate the new line & column.
+
+        As an optional optimization, set test_newline=False if token doesn't contain a newline.
+        """
+        if test_newline:
+            newlines = token.count(self.newline_char)
+            if newlines:
+                self.line += newlines
+                self.line_start_pos = self.char_pos + token.rindex(self.newline_char) + 1
+
+        self.char_pos += len(token)
+        self.column = self.char_pos - self.line_start_pos + 1
+
+
+class UnlessCallback:
+    def __init__(self, scanner):
+        self.scanner = scanner
+
+    def __call__(self, t):
+        res = self.scanner.match(t.value, 0)
+        if res:
+            _value, t.type = res
+        return t
+
+
+class CallChain:
+    def __init__(self, callback1, callback2, cond):
+        self.callback1 = callback1
+        self.callback2 = callback2
+        self.cond = cond
+
+    def __call__(self, t):
+        t2 = self.callback1(t)
+        return self.callback2(t) if self.cond(t2) else t2
+
+
+def _get_match(re_, regexp, s, flags):
+    m = re_.match(regexp, s, flags)
+    if m:
+        return m.group(0)
+
+def _create_unless(terminals, g_regex_flags, re_, use_bytes):
+    tokens_by_type = classify(terminals, lambda t: type(t.pattern))
+    assert len(tokens_by_type) <= 2, tokens_by_type.keys()
+    embedded_strs = set()
+    callback = {}
+    for retok in tokens_by_type.get(PatternRE, []):
+        unless = []
+        for strtok in tokens_by_type.get(PatternStr, []):
+            if strtok.priority != retok.priority:
                 continue
-            if isinstance(tdef, _inherit):
-                # should be processed already, but may not in the case of:
-                # 1. the state has no counterpart in any parent
-                # 2. the state includes more than one 'inherit'
-                continue
-            if isinstance(tdef, default):
-                new_state = cls._process_new_state(tdef.state, unprocessed, processed)
-                tokens.append((re.compile('').match, None, new_state))
-                continue
+            s = strtok.pattern.value
+            if s == _get_match(re_, retok.pattern.to_regexp(), s, g_regex_flags):
+                unless.append(strtok)
+                if strtok.pattern.flags <= retok.pattern.flags:
+                    embedded_strs.add(strtok)
+        if unless:
+            callback[retok.name] = UnlessCallback(Scanner(unless, g_regex_flags, re_, match_whole=True, use_bytes=use_bytes))
 
-            assert type(tdef) is tuple, "wrong rule def %r" % tdef
+    new_terminals = [t for t in terminals if t not in embedded_strs]
+    return new_terminals, callback
 
+
+class Scanner:
+    def __init__(self, terminals, g_regex_flags, re_, use_bytes, match_whole=False):
+        self.terminals = terminals
+        self.g_regex_flags = g_regex_flags
+        self.re_ = re_
+        self.use_bytes = use_bytes
+        self.match_whole = match_whole
+
+        self.allowed_types = {t.name for t in self.terminals}
+
+        self._mres = self._build_mres(terminals, len(terminals))
+
+    def _build_mres(self, terminals, max_size):
+        # Python sets an unreasonable group limit (currently 100) in its re module
+        # Worse, the only way to know we reached it is by catching an AssertionError!
+        # This function recursively tries less and less groups until it's successful.
+        postfix = '$' if self.match_whole else ''
+        mres = []
+        while terminals:
+            pattern = u'|'.join(u'(?P<%s>%s)' % (t.name, t.pattern.to_regexp() + postfix) for t in terminals[:max_size])
+            if self.use_bytes:
+                pattern = pattern.encode('latin-1')
             try:
-                rex = cls._process_regex(tdef[0], rflags, state)
-            except Exception as err:
-                raise ValueError("uncompilable regex %r in state %r of %r: %s" %
-                                 (tdef[0], state, cls, err)) from err
+                mre = self.re_.compile(pattern, self.g_regex_flags)
+            except AssertionError:  # Yes, this is what Python provides us.. :/
+                return self._build_mres(terminals, max_size // 2)
 
-            token = cls._process_token(tdef[1])
+            mres.append(mre)
+            terminals = terminals[max_size:]
+        return mres
 
-            if len(tdef) == 2:
-                new_state = None
-            else:
-                new_state = cls._process_new_state(tdef[2],
-                                                   unprocessed, processed)
-
-            tokens.append((rex, token, new_state))
-        return tokens
-
-    def process_tokendef(cls, name, tokendefs=None):
-        """Preprocess a dictionary of token definitions."""
-        processed = cls._all_tokens[name] = {}
-        tokendefs = tokendefs or cls.tokens[name]
-        for state in list(tokendefs):
-            cls._process_state(tokendefs, processed, state)
-        return processed
-
-    def get_tokendefs(cls):
-        """
-        Merge tokens from superclasses in MRO order, returning a single tokendef
-        dictionary.
-
-        Any state that is not defined by a subclass will be inherited
-        automatically.  States that *are* defined by subclasses will, by
-        default, override that state in the superclass.  If a subclass wishes to
-        inherit definitions from a superclass, it can use the special value
-        "inherit", which will cause the superclass' state definition to be
-        included at that point in the state.
-        """
-        tokens = {}
-        inheritable = {}
-        for c in cls.__mro__:
-            toks = c.__dict__.get('tokens', {})
-
-            for state, items in toks.items():
-                curitems = tokens.get(state)
-                if curitems is None:
-                    # N.b. because this is assigned by reference, sufficiently
-                    # deep hierarchies are processed incrementally (e.g. for
-                    # A(B), B(C), C(RegexLexer), B will be premodified so X(B)
-                    # will not see any inherits in B).
-                    tokens[state] = items
-                    try:
-                        inherit_ndx = items.index(inherit)
-                    except ValueError:
-                        continue
-                    inheritable[state] = inherit_ndx
-                    continue
-
-                inherit_ndx = inheritable.pop(state, None)
-                if inherit_ndx is None:
-                    continue
-
-                # Replace the "inherit" value with the items
-                curitems[inherit_ndx:inherit_ndx+1] = items
-                try:
-                    # N.b. this is the index in items (that is, the superclass
-                    # copy), so offset required when storing below.
-                    new_inh_ndx = items.index(inherit)
-                except ValueError:
-                    pass
-                else:
-                    inheritable[state] = inherit_ndx + new_inh_ndx
-
-        return tokens
-
-    def __call__(cls, *args, **kwds):
-        """Instantiate cls after preprocessing its token definitions."""
-        if '_tokens' not in cls.__dict__:
-            cls._all_tokens = {}
-            cls._tmpname = 0
-            if hasattr(cls, 'token_variants') and cls.token_variants:
-                # don't process yet
-                pass
-            else:
-                cls._tokens = cls.process_tokendef('', cls.get_tokendefs())
-
-        return type.__call__(cls, *args, **kwds)
+    def match(self, text, pos):
+        for mre in self._mres:
+            m = mre.match(text, pos)
+            if m:
+                return m.group(0), m.lastgroup
 
 
-class RegexLexer(Lexer, metaclass=RegexLexerMeta):
+def _regexp_has_newline(r: str):
+    r"""Expressions that may indicate newlines in a regexp:
+        - newlines (\n)
+        - escaped newline (\\n)
+        - anything but ([^...])
+        - any-char (.) when the flag (?s) exists
+        - spaces (\s)
     """
-    Base for simple stateful regular expression-based lexers.
-    Simplifies the lexing process so that you need only
-    provide a list of states and regular expressions.
+    return '\n' in r or '\\n' in r or '\\s' in r or '[^' in r or ('(?s' in r and '.' in r)
+
+
+class LexerState:
+    """Represents the current state of the lexer as it scans the text
+    (Lexer objects are only instantiated per grammar, not per text)
     """
 
-    #: Flags for compiling the regular expressions.
-    #: Defaults to MULTILINE.
-    flags = re.MULTILINE
+    __slots__ = 'text', 'line_ctr', 'last_token'
 
-    #: At all time there is a stack of states. Initially, the stack contains
-    #: a single state 'root'. The top of the stack is called "the current state".
-    #:
-    #: Dict of ``{'state': [(regex, tokentype, new_state), ...], ...}``
-    #:
-    #: ``new_state`` can be omitted to signify no state transition.
-    #: If ``new_state`` is a string, it is pushed on the stack. This ensure
-    #: the new current state is ``new_state``.
-    #: If ``new_state`` is a tuple of strings, all of those strings are pushed
-    #: on the stack and the current state will be the last element of the list.
-    #: ``new_state`` can also be ``combined('state1', 'state2', ...)``
-    #: to signify a new, anonymous state combined from the rules of two
-    #: or more existing ones.
-    #: Furthermore, it can be '#pop' to signify going back one step in
-    #: the state stack, or '#push' to push the current state on the stack
-    #: again. Note that if you push while in a combined state, the combined
-    #: state itself is pushed, and not only the state in which the rule is
-    #: defined.
-    #:
-    #: The tuple can also be replaced with ``include('state')``, in which
-    #: case the rules from the state named by the string are included in the
-    #: current one.
-    tokens = {}
+    text: str
+    line_ctr: LineCounter
+    last_token: Optional[Token]
 
-    def get_tokens_unprocessed(self, text, stack=('root',)):
-        """
-        Split ``text`` into (tokentype, text) pairs.
-
-        ``stack`` is the inital stack (default: ``['root']``)
-        """
-        pos = 0
-        tokendefs = self._tokens
-        statestack = list(stack)
-        statetokens = tokendefs[statestack[-1]]
-        while 1:
-            for rexmatch, action, new_state in statetokens:
-                m = rexmatch(text, pos)
-                if m:
-                    if action is not None:
-                        if type(action) is _TokenType:
-                            yield pos, action, m.group()
-                        else:
-                            yield from action(self, m)
-                    pos = m.end()
-                    if new_state is not None:
-                        # state transition
-                        if isinstance(new_state, tuple):
-                            for state in new_state:
-                                if state == '#pop':
-                                    if len(statestack) > 1:
-                                        statestack.pop()
-                                elif state == '#push':
-                                    statestack.append(statestack[-1])
-                                else:
-                                    statestack.append(state)
-                        elif isinstance(new_state, int):
-                            # pop, but keep at least one state on the stack
-                            # (random code leading to unexpected pops should
-                            # not allow exceptions)
-                            if abs(new_state) >= len(statestack):
-                                del statestack[1:]
-                            else:
-                                del statestack[new_state:]
-                        elif new_state == '#push':
-                            statestack.append(statestack[-1])
-                        else:
-                            assert False, "wrong state def: %r" % new_state
-                        statetokens = tokendefs[statestack[-1]]
-                    break
-            else:
-                # We are here only if all state tokens have been considered
-                # and there was not a match on any of them.
-                try:
-                    if text[pos] == '\n':
-                        # at EOL, reset state to "root"
-                        statestack = ['root']
-                        statetokens = tokendefs['root']
-                        yield pos, Text, '\n'
-                        pos += 1
-                        continue
-                    yield pos, Error, text[pos]
-                    pos += 1
-                except IndexError:
-                    break
-
-
-class LexerContext:
-    """
-    A helper object that holds lexer position data.
-    """
-
-    def __init__(self, text, pos, stack=None, end=None):
+    def __init__(self, text: str, line_ctr: Optional[LineCounter]=None, last_token: Optional[Token]=None):
         self.text = text
-        self.pos = pos
-        self.end = end or len(text)  # end=0 not supported ;-)
-        self.stack = stack or ['root']
+        self.line_ctr = line_ctr or LineCounter(b'\n' if isinstance(text, bytes) else '\n')
+        self.last_token = last_token
 
-    def __repr__(self):
-        return 'LexerContext(%r, %r, %r)' % (
-            self.text, self.pos, self.stack)
+    def __eq__(self, other):
+        if not isinstance(other, LexerState):
+            return NotImplemented
+
+        return self.text is other.text and self.line_ctr == other.line_ctr and self.last_token == other.last_token
+
+    def __copy__(self):
+        return type(self)(self.text, copy(self.line_ctr), self.last_token)
 
 
-class ExtendedRegexLexer(RegexLexer):
+class LexerThread:
+    """A thread that ties a lexer instance and a lexer state, to be used by the parser
     """
-    A RegexLexer that uses a context object to store its state.
+
+    def __init__(self, lexer: 'Lexer', lexer_state: LexerState):
+        self.lexer = lexer
+        self.state = lexer_state
+
+    @classmethod
+    def from_text(cls, lexer: 'Lexer', text: str) -> 'LexerThread':
+        return cls(lexer, LexerState(text))
+
+    def lex(self, parser_state):
+        return self.lexer.lex(self.state, parser_state)
+
+    def __copy__(self):
+        return type(self)(self.lexer, copy(self.state))
+
+    _Token = Token
+
+
+_Callback = Callable[[Token], Token]
+
+class Lexer(ABC):
+    """Lexer interface
+
+    Method Signatures:
+        lex(self, lexer_state, parser_state) -> Iterator[Token]
     """
+    @abstractmethod
+    def lex(self, lexer_state: LexerState, parser_state: Any) -> Iterator[Token]:
+        return NotImplemented
 
-    def get_tokens_unprocessed(self, text=None, context=None):
-        """
-        Split ``text`` into (tokentype, text) pairs.
-        If ``context`` is given, use this lexer context instead.
-        """
-        tokendefs = self._tokens
-        if not context:
-            ctx = LexerContext(text, 0)
-            statetokens = tokendefs['root']
-        else:
-            ctx = context
-            statetokens = tokendefs[ctx.stack[-1]]
-            text = ctx.text
-        while 1:
-            for rexmatch, action, new_state in statetokens:
-                m = rexmatch(text, ctx.pos, ctx.end)
-                if m:
-                    if action is not None:
-                        if type(action) is _TokenType:
-                            yield ctx.pos, action, m.group()
-                            ctx.pos = m.end()
-                        else:
-                            yield from action(self, m, ctx)
-                            if not new_state:
-                                # altered the state stack?
-                                statetokens = tokendefs[ctx.stack[-1]]
-                    # CAUTION: callback must set ctx.pos!
-                    if new_state is not None:
-                        # state transition
-                        if isinstance(new_state, tuple):
-                            for state in new_state:
-                                if state == '#pop':
-                                    if len(ctx.stack) > 1:
-                                        ctx.stack.pop()
-                                elif state == '#push':
-                                    ctx.stack.append(ctx.stack[-1])
-                                else:
-                                    ctx.stack.append(state)
-                        elif isinstance(new_state, int):
-                            # see RegexLexer for why this check is made
-                            if abs(new_state) >= len(ctx.stack):
-                                del ctx.state[1:]
-                            else:
-                                del ctx.stack[new_state:]
-                        elif new_state == '#push':
-                            ctx.stack.append(ctx.stack[-1])
-                        else:
-                            assert False, "wrong state def: %r" % new_state
-                        statetokens = tokendefs[ctx.stack[-1]]
-                    break
-            else:
-                try:
-                    if ctx.pos >= ctx.end:
-                        break
-                    if text[ctx.pos] == '\n':
-                        # at EOL, reset state to "root"
-                        ctx.stack = ['root']
-                        statetokens = tokendefs['root']
-                        yield ctx.pos, Text, '\n'
-                        ctx.pos += 1
-                        continue
-                    yield ctx.pos, Error, text[ctx.pos]
-                    ctx.pos += 1
-                except IndexError:
-                    break
+    def make_lexer_state(self, text):
+        "Deprecated"
+        return LexerState(text)
 
 
-def do_insertions(insertions, tokens):
-    """
-    Helper for lexers which must combine the results of several
-    sublexers.
+def _check_regex_collisions(terminal_to_regexp: Dict[TerminalDef, str], comparator, strict_mode, max_collisions_to_show=8):
+    if not comparator:
+        comparator = interegular.Comparator.from_regexes(terminal_to_regexp)
 
-    ``insertions`` is a list of ``(index, itokens)`` pairs.
-    Each ``itokens`` iterable should be inserted at position
-    ``index`` into the token stream given by the ``tokens``
-    argument.
+    # When in strict mode, we only ever try to provide one example, so taking
+    # a long time for that should be fine
+    max_time = 2 if strict_mode else 0.2
 
-    The result is a combined token stream.
-
-    TODO: clean up the code here.
-    """
-    insertions = iter(insertions)
-    try:
-        index, itokens = next(insertions)
-    except StopIteration:
-        # no insertions
-        yield from tokens
+    # We don't want to show too many collisions.
+    if comparator.count_marked_pairs() >= max_collisions_to_show:
         return
+    for group in classify(terminal_to_regexp, lambda t: t.priority).values():
+        for a, b in comparator.check(group, skip_marked=True):
+            assert a.priority == b.priority
+            # Mark this pair to not repeat warnings when multiple different BasicLexers see the same collision
+            comparator.mark(a, b)
 
-    realpos = None
-    insleft = True
-
-    # iterate over the token stream where we want to insert
-    # the tokens from the insertion list.
-    for i, t, v in tokens:
-        # first iteration. store the postition of first item
-        if realpos is None:
-            realpos = i
-        oldi = 0
-        while insleft and i + len(v) >= index:
-            tmpval = v[oldi:index - i]
-            if tmpval:
-                yield realpos, t, tmpval
-                realpos += len(tmpval)
-            for it_index, it_token, it_value in itokens:
-                yield realpos, it_token, it_value
-                realpos += len(it_value)
-            oldi = index - i
+            # Notify the user
+            message = f"Collision between Terminals {a.name} and {b.name}. "
             try:
-                index, itokens = next(insertions)
-            except StopIteration:
-                insleft = False
-                break  # not strictly necessary
-        if oldi < len(v):
-            yield realpos, t, v[oldi:]
-            realpos += len(v) - oldi
-
-    # leftover tokens
-    while insleft:
-        # no normal tokens, set realpos to zero
-        realpos = realpos or 0
-        for p, t, v in itokens:
-            yield realpos, t, v
-            realpos += len(v)
-        try:
-            index, itokens = next(insertions)
-        except StopIteration:
-            insleft = False
-            break  # not strictly necessary
+                example = comparator.get_example_overlap(a, b, max_time).format_multiline()
+            except ValueError:
+                # Couldn't find an example within max_time steps.
+                example = "No example could be found fast enough. However, the collision does still exists"
+            if strict_mode:
+                raise LexError(f"{message}\n{example}")
+            logger.warning("%s The lexer will choose between them arbitrarily.\n%s", message, example)
+            if comparator.count_marked_pairs() >= max_collisions_to_show:
+                logger.warning("Found 8 regex collisions, will not check for more.")
+                return
 
 
-class ProfilingRegexLexerMeta(RegexLexerMeta):
-    """Metaclass for ProfilingRegexLexer, collects regex timing info."""
+class AbstractBasicLexer(Lexer):
+    terminals_by_name: Dict[str, TerminalDef]
 
-    def _process_regex(cls, regex, rflags, state):
-        if isinstance(regex, words):
-            rex = regex_opt(regex.words, prefix=regex.prefix,
-                            suffix=regex.suffix)
+    @abstractmethod
+    def __init__(self, conf: 'LexerConf', comparator=None) -> None:
+        ...
+
+    @abstractmethod
+    def next_token(self, lex_state: LexerState, parser_state: Any = None) -> Token:
+        ...
+
+    def lex(self, state: LexerState, parser_state: Any) -> Iterator[Token]:
+        with suppress(EOFError):
+            while True:
+                yield self.next_token(state, parser_state)
+
+
+class BasicLexer(AbstractBasicLexer):
+    terminals: Collection[TerminalDef]
+    ignore_types: FrozenSet[str]
+    newline_types: FrozenSet[str]
+    user_callbacks: Dict[str, _Callback]
+    callback: Dict[str, _Callback]
+    re: ModuleType
+
+    def __init__(self, conf: 'LexerConf', comparator=None) -> None:
+        terminals = list(conf.terminals)
+        assert all(isinstance(t, TerminalDef) for t in terminals), terminals
+
+        self.re = conf.re_module
+
+        if not conf.skip_validation:
+            # Sanitization
+            terminal_to_regexp = {}
+            for t in terminals:
+                regexp = t.pattern.to_regexp()
+                try:
+                    self.re.compile(regexp, conf.g_regex_flags)
+                except self.re.error:
+                    raise LexError("Cannot compile token %s: %s" % (t.name, t.pattern))
+
+                if t.pattern.min_width == 0:
+                    raise LexError("Lexer does not allow zero-width terminals. (%s: %s)" % (t.name, t.pattern))
+                if t.pattern.type == "re":
+                    terminal_to_regexp[t] = regexp
+
+            if not (set(conf.ignore) <= {t.name for t in terminals}):
+                raise LexError("Ignore terminals are not defined: %s" % (set(conf.ignore) - {t.name for t in terminals}))
+
+            if has_interegular:
+                _check_regex_collisions(terminal_to_regexp, comparator, conf.strict)
+            elif conf.strict:
+                raise LexError("interegular must be installed for strict mode. Use `pip install 'lark[interegular]'`.")
+
+        # Init
+        self.newline_types = frozenset(t.name for t in terminals if _regexp_has_newline(t.pattern.to_regexp()))
+        self.ignore_types = frozenset(conf.ignore)
+
+        terminals.sort(key=lambda x: (-x.priority, -x.pattern.max_width, -len(x.pattern.value), x.name))
+        self.terminals = terminals
+        self.user_callbacks = conf.callbacks
+        self.g_regex_flags = conf.g_regex_flags
+        self.use_bytes = conf.use_bytes
+        self.terminals_by_name = conf.terminals_by_name
+
+        self._scanner = None
+
+    def _build_scanner(self):
+        terminals, self.callback = _create_unless(self.terminals, self.g_regex_flags, self.re, self.use_bytes)
+        assert all(self.callback.values())
+
+        for type_, f in self.user_callbacks.items():
+            if type_ in self.callback:
+                # Already a callback there, probably UnlessCallback
+                self.callback[type_] = CallChain(self.callback[type_], f, lambda t: t.type == type_)
+            else:
+                self.callback[type_] = f
+
+        self._scanner = Scanner(terminals, self.g_regex_flags, self.re, self.use_bytes)
+
+    @property
+    def scanner(self):
+        if self._scanner is None:
+            self._build_scanner()
+        return self._scanner
+
+    def match(self, text, pos):
+        return self.scanner.match(text, pos)
+
+    def next_token(self, lex_state: LexerState, parser_state: Any = None) -> Token:
+        line_ctr = lex_state.line_ctr
+        while line_ctr.char_pos < len(lex_state.text):
+            res = self.match(lex_state.text, line_ctr.char_pos)
+            if not res:
+                allowed = self.scanner.allowed_types - self.ignore_types
+                if not allowed:
+                    allowed = {"<END-OF-FILE>"}
+                raise UnexpectedCharacters(lex_state.text, line_ctr.char_pos, line_ctr.line, line_ctr.column,
+                                           allowed=allowed, token_history=lex_state.last_token and [lex_state.last_token],
+                                           state=parser_state, terminals_by_name=self.terminals_by_name)
+
+            value, type_ = res
+
+            ignored = type_ in self.ignore_types
+            t = None
+            if not ignored or type_ in self.callback:
+                t = Token(type_, value, line_ctr.char_pos, line_ctr.line, line_ctr.column)
+            line_ctr.feed(value, type_ in self.newline_types)
+            if t is not None:
+                t.end_line = line_ctr.line
+                t.end_column = line_ctr.column
+                t.end_pos = line_ctr.char_pos
+                if t.type in self.callback:
+                    t = self.callback[t.type](t)
+                if not ignored:
+                    if not isinstance(t, Token):
+                        raise LexError("Callbacks must return a token (returned %r)" % t)
+                    lex_state.last_token = t
+                    return t
+
+        # EOF
+        raise EOFError(self)
+
+
+class ContextualLexer(Lexer):
+    lexers: Dict[int, AbstractBasicLexer]
+    root_lexer: AbstractBasicLexer
+
+    BasicLexer: Type[AbstractBasicLexer] = BasicLexer
+
+    def __init__(self, conf: 'LexerConf', states: Dict[int, Collection[str]], always_accept: Collection[str]=()) -> None:
+        terminals = list(conf.terminals)
+        terminals_by_name = conf.terminals_by_name
+
+        trad_conf = copy(conf)
+        trad_conf.terminals = terminals
+
+        if has_interegular and not conf.skip_validation:
+            comparator = interegular.Comparator.from_regexes({t: t.pattern.to_regexp() for t in terminals})
         else:
-            rex = regex
-        compiled = re.compile(rex, rflags)
+            comparator = None
+        lexer_by_tokens: Dict[FrozenSet[str], AbstractBasicLexer] = {}
+        self.lexers = {}
+        for state, accepts in states.items():
+            key = frozenset(accepts)
+            try:
+                lexer = lexer_by_tokens[key]
+            except KeyError:
+                accepts = set(accepts) | set(conf.ignore) | set(always_accept)
+                lexer_conf = copy(trad_conf)
+                lexer_conf.terminals = [terminals_by_name[n] for n in accepts if n in terminals_by_name]
+                lexer = self.BasicLexer(lexer_conf, comparator)
+                lexer_by_tokens[key] = lexer
 
-        def match_func(text, pos, endpos=sys.maxsize):
-            info = cls._prof_data[-1].setdefault((state, rex), [0, 0.0])
-            t0 = time.time()
-            res = compiled.match(text, pos, endpos)
-            t1 = time.time()
-            info[0] += 1
-            info[1] += t1 - t0
-            return res
-        return match_func
+            self.lexers[state] = lexer
 
+        assert trad_conf.terminals is terminals
+        trad_conf.skip_validation = True  # We don't need to verify all terminals again
+        self.root_lexer = self.BasicLexer(trad_conf, comparator)
 
-class ProfilingRegexLexer(RegexLexer, metaclass=ProfilingRegexLexerMeta):
-    """Drop-in replacement for RegexLexer that does profiling of its regexes."""
+    def lex(self, lexer_state: LexerState, parser_state: 'ParserState') -> Iterator[Token]:
+        try:
+            while True:
+                lexer = self.lexers[parser_state.position]
+                yield lexer.next_token(lexer_state, parser_state)
+        except EOFError:
+            pass
+        except UnexpectedCharacters as e:
+            # In the contextual lexer, UnexpectedCharacters can mean that the terminal is defined, but not in the current context.
+            # This tests the input against the global context, to provide a nicer error.
+            try:
+                last_token = lexer_state.last_token  # Save last_token. Calling root_lexer.next_token will change this to the wrong token
+                token = self.root_lexer.next_token(lexer_state, parser_state)
+                raise UnexpectedToken(token, e.allowed, state=parser_state, token_history=[last_token], terminals_by_name=self.root_lexer.terminals_by_name)
+            except UnexpectedCharacters:
+                raise e  # Raise the original UnexpectedCharacters. The root lexer raises it with the wrong expected set.
 
-    _prof_data = []
-    _prof_sort_index = 4  # defaults to time per call
-
-    def get_tokens_unprocessed(self, text, stack=('root',)):
-        # this needs to be a stack, since using(this) will produce nested calls
-        self.__class__._prof_data.append({})
-        yield from RegexLexer.get_tokens_unprocessed(self, text, stack)
-        rawdata = self.__class__._prof_data.pop()
-        data = sorted(((s, repr(r).strip('u\'').replace('\\\\', '\\')[:65],
-                        n, 1000 * t, 1000 * t / n)
-                       for ((s, r), (n, t)) in rawdata.items()),
-                      key=lambda x: x[self._prof_sort_index],
-                      reverse=True)
-        sum_total = sum(x[3] for x in data)
-
-        print()
-        print('Profiling result for %s lexing %d chars in %.3f ms' %
-              (self.__class__.__name__, len(text), sum_total))
-        print('=' * 110)
-        print('%-20s %-64s ncalls  tottime  percall' % ('state', 'regex'))
-        print('-' * 110)
-        for d in data:
-            print('%-20s %-65s %5d %8.4f %8.4f' % d)
-        print('=' * 110)
+###}

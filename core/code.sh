@@ -1,7 +1,9 @@
 #!/bin/sh
-clear
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🤖 HOOPSTREET UNIFIED AI AGENT"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-python3 /root/ish-dev/core/agent_unified.py
+echo "════════════════════════════════════════════════════════"
+echo "     🚀 CODE EXECUTOR"
+echo "════════════════════════════════════════════════════════"
+echo ""
+echo "Paste your multi-phase code (type END on new line):"
+echo ""
+python3 /root/hoopstreet/run.py
