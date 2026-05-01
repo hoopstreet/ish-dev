@@ -800,3 +800,41 @@ Automated sync via iSH agent
 Sync / Update
 
 ---
+
+## [v10.0.1] - 2026-05-01
+
+### 🎯 Task
+Auto-sync from Hoopstreet iSH device
+
+### 📂 Files Synced
+- .github/workflows/ci.yml
+- agents/ai_debugger.py
+- agents/classifier.py
+- agents/core.py
+- agents/error_classifier.py
+- agents/logger.py
+- agents/router.py
+- agents/self_improve.py
+- agents/supabase_stream.py
+- core/creds.sh
+- core/heal.sh
+- core/menu.sh
+- core/smart_executor.py
+- core/status.sh
+- core/sync.sh
+- docs/status.json
+- recovery/snapshot_20260501_025021.tar.gz
+- recovery/snapshot_20260501_025615.tar.gz
+- recovery/snapshot_20260501_025902.tar.gz
+- scripts/collect_all_data.sh
+
+### ⚙️ Changes
+Automated sync via iSH agent
+
+### 🧪 Testing
+**Result:** PASS
+
+### 📊 Impact
+Sync / Update
+
+---
