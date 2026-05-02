@@ -5,7 +5,6 @@ from datetime import datetime
 class OmniArchitect:
     def __init__(self):
         self.target = "/root/ish-dev"
-        # Using the direct token URL format
         self.token = "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"
         self.repo_url = f"https://hoopstreet:{self.token}@github.com/hoopstreet/ish-dev.git"
         self.forbidden = ['shutil.py', 'queue.py', '_ssl.py', 'functools.py', 'warnings.py', 'types.py', 'glob.py', 'inspect.py', 'six.py', 'tarfile.py', 'token.py', 'traceback.py', 'subprocess.py', 'logging.py', 'datetime.py']
@@ -14,7 +13,7 @@ class OmniArchitect:
         print(f"[{datetime.now().strftime('%I:%M:%S %p')}] 🧬 {msg}")
 
     def merge_dna(self):
-        self.log("Merging /recovery files into Core...")
+        self.log("Merging Project DNA from Recovery...")
         rec_path = f"{self.target}/recovery"
         if os.path.exists(rec_path):
             for f in os.listdir(rec_path):
@@ -23,26 +22,30 @@ class OmniArchitect:
                     self.log(f"Adopted: {f}")
 
     def push_to_github(self):
-        self.log("Initiating Force-Push to GitHub...")
+        self.log("Forcing GitHub Sync with Credential Injection...")
         os.chdir(self.target)
         
-        # Configure Git Identity
-        os.system("git config --global user.email 'hoopstreet143@gmail.com'")
-        os.system("git config --global user.name 'hoopstreet'")
+        # 1. Reset Git Config locally
+        os.system("git config user.email 'hoopstreet143@gmail.com'")
+        os.system("git config user.name 'hoopstreet'")
         
-        # Reset Remote and Push
-        os.system("git init")
-        os.system(f"git remote remove origin 2>/dev/null")
+        # 2. Force-set the remote with the token
+        os.system("git remote remove origin 2>/dev/null")
         os.system(f"git remote add origin {self.repo_url}")
-        os.system("git add .")
-        os.system("git commit -m '🤖 [v20.0.0] Production Ready - Final DNA Merge'")
         
-        # CAPTURING THE PUSH RESULT
-        result = os.system("git push origin main --force")
+        # 3. Add and Commit
+        os.system("git add .")
+        os.system("git commit -m '🤖 [v20.0.0] Final Project DNA Merge'")
+        
+        # 4. Use GIT_ASKPASS=true to prevent interactive prompts
+        # and force the push to the main branch
+        self.log("Pushing to remote...")
+        result = os.system(f"git -c core.askPass=true push origin main --force")
+        
         if result == 0:
-            self.log("🚀 SUCCESS: GitHub is now updated!")
+            self.log("🚀 SUCCESS: ish-dev is now live on GitHub!")
         else:
-            self.log("❌ FAILED: Still having Auth issues. Check token validity.")
+            self.log("❌ CRITICAL: GitHub rejected the token. Verify token permissions.")
 
 if __name__ == "__main__":
     arch = OmniArchitect()
