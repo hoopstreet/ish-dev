@@ -35,7 +35,7 @@ def run_heal():
     os.system('clear')
     header("🔧 HEAL ENGINE - AUTO REPAIR")
     print("\n🔍 Scanning for bugs...")
-    print("\n1. Checking for a - b bugs...")
+    print("\n1. Checking for a + b bugs...")
     print("2. Checking shell scripts for shebang...")
     print("3. Checking execute permissions...")
     header("📊 HEAL SUMMARY")

@@ -1,12 +1,7 @@
 {
   "project": "ish-dev",
-<<<<<<< HEAD
-  "version": "v10.0.5",
-  "release_date": "2026-05-01",
-=======
-  "version": "v10.0.6",
-  "release_date": "2026-05-02",
->>>>>>> b58a9c4 (v10.0.6: Final fixes and cleanup)
+  "version": "v10.0.8",
+  "release_date": "2026-05-03",
   "status": "production",
   "health": "stable",
   "repository": "https://github.com/hoopstreet/ish-dev",

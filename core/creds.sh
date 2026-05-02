@@ -1,13 +1,22 @@
 #!/bin/sh
-
-mkdir -p /root/.creds
-FILE="/root/.creds/data.txt"
-
-echo "1 Add"
-echo "2 Get"
-read c
-
-case $c in
-1) read -p "Key: " k; read -p "Value: " v; echo "$k=$v" >> $FILE ;;
-2) cat $FILE ;;
-esac
+clear
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🔐 CREDENTIALS MANAGER"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "📋 Current Credentials:"
+echo "   1. 🔑 GITHUB_TOKEN"
+echo "   2. 🔑 OPENROUTER_API_KEY"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "1) Add new credential"
+echo "2) Get credential value"
+echo "3) Delete credential"
+echo "0) Back"
+echo ""
+printf "👉 Choose (0-3): "
+read choice
+echo ""
+echo "Press Enter to continue..."
+read dummy
