@@ -6,34 +6,34 @@ class OmniArchitect:
     def __init__(self):
         self.target = "/root/ish-dev"
         self.repo = "https://hoopstreet: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@github.com/hoopstreet/ish-dev.git"
-        self.forbidden = ['token.py', 'traceback.py', 'subprocess.py', 'json.py', 'logging.py', 'datetime.py']
+        # STRICT FORBIDDEN LIST - Do not move these into core
+        self.forbidden = ['shutil.py', 'queue.py', '_ssl.py', 'functools.py', 'warnings.py', 'types.py', 'glob.py', 'inspect.py', 'six.py', 'tarfile.py', 'token.py', 'traceback.py', 'subprocess.py', 'logging.py', 'datetime.py', 're.py', 'enum.py']
 
     def log(self, msg):
         print(f"[{datetime.now().strftime('%I:%M:%S %p')}] 🧬 {msg}")
 
-    def merge_history(self):
-        self.log("Deep Scanning /recovery for ish-dev DNA...")
+    def merge_ish_dev(self):
+        self.log("Deep Scanning /recovery for Project DNA...")
         rec_path = f"{self.target}/recovery"
         if os.path.exists(rec_path):
             for f in os.listdir(rec_path):
-                if f.endswith(('.py', '.sh')) and f not in self.forbidden:
+                # ONLY adopt files that are NOT in the forbidden list
+                if f.endswith(('.py', '.sh', '.json')) and f not in self.forbidden:
                     shutil.copy2(os.path.join(rec_path, f), f"{self.target}/core/{f}")
-                    self.log(f"Adopted: {f}")
+                    self.log(f"Merged Project File: {f}")
 
-    def sync_github(self):
-        self.log("Finalizing ish-dev GitHub Merge...")
-        commands = [
-            "git init",
-            f"git remote add origin {self.repo} || git remote set-url origin {self.repo}",
-            "git add .",
-            "git commit -m '🤖 [v20.0.0] Final ish-dev DNA Merge & Stabilization'",
-            "git push origin main --force"
-        ]
-        for cmd in commands:
-            subprocess.run(f"cd {self.target} && {cmd}", shell=True, capture_output=True)
-        self.log("✅ GitHub Merge 100% Complete.")
+    def sync_to_github(self):
+        self.log("Pushing Clean ish-dev Setup to GitHub...")
+        # Running without capture_output so you can see any real Git errors
+        os.chdir(self.target)
+        os.system("git init")
+        os.system(f"git remote add origin {self.repo} || git remote set-url origin {self.repo}")
+        os.system("git add .")
+        os.system("git commit -m '🤖 [v20.0.0] Final Clean Merge - Project DNA Only'")
+        os.system("git push origin main --force")
+        self.log("✅ GitHub Sync Attempt Finished.")
 
 if __name__ == "__main__":
     arch = OmniArchitect()
-    arch.merge_history()
-    arch.sync_github()
+    arch.merge_ish_dev()
+    arch.sync_to_github()
