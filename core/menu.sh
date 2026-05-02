@@ -4,7 +4,7 @@ while true; do
     printf "\033[2J\033[H"
     
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET ISH-DEV DASHBOARD v10.0.8"
+    echo "📲 HOOPSTREET ISH-DEV DASHBOARD v10.0.9"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📋 MAIN MENU OPTIONS:"
     echo "   1. 🤖 Agent          - AI Assistant"
