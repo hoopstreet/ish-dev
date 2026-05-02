@@ -1,0 +1,38 @@
+# Python
+*.pyc
+__pycache__/
+*.pyo
+
+# Backup files
+*.backup
+*.bak
+backups/
+
+# Archive
+archive/
+
+# Logs
+*.log
+logs.txt
+
+# Credentials
+.secrets/
+.hoopstreet/
+
+# Temp files
+/tmp/
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+.hoopstreet/
+*.env
+credentials.json
+trash/
+*.log
+*.tmp

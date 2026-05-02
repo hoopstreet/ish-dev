@@ -1,0 +1,12 @@
+{
+  "projects": [
+    {
+      "name": "ish-dev",
+      "repo_url": "https://github.com/hoopstreet/ish-dev"
+    },
+    {
+      "name": "Teleset",
+      "repo_url": "https://github.com/hoopstreet/Teleset"
+    }
+  ]
+}
