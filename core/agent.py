@@ -4,12 +4,13 @@ import sys
 import requests
 import json
 
-API_KEY = "AIzaSyDHhh5zkL6NnEBD9SI-sLfl9Ur8yNA6PxA"
+# Rotating to a fresh key from your provided list
+API_KEY = "AIzaSyA5BU2mk6o2HHJMq1pqydwFeJUpd36akHU"
 
 def run_gemini_cli(prompt):
-    print(f"🤖 Gemini CLI Agent [v9.3.4] Analyzing...")
-    # Updated to the standard v1 endpoint and specific model naming convention
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={API_KEY}"
+    print(f"🤖 Gemini CLI Agent [v9.3.6] Analyzing...")
+    # Explicit model path for v1beta
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"parts": [{"text": f"{prompt}. Output only raw linux shell commands. No markdown, no explanations."}]}]
@@ -25,13 +26,12 @@ def run_gemini_cli(prompt):
             
             for line in clean_commands.split('\n'):
                 line = line.strip()
-                if line:
+                if line and not line.startswith('#'):
                     print(f"🚀 Executing: {line}")
                     os.system(line)
         else:
-            # Check for alternative error structures
-            err_msg = data.get('error', {}).get('message', 'Unknown API Error')
-            print(f"❌ API Error: {err_msg}")
+            msg = data.get('error', {}).get('message', 'Unknown API structure')
+            print(f"❌ API Error: {msg}")
             
     except Exception as e:
         print(f"❌ System Error: {e}")
