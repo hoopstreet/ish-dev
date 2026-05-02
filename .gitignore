@@ -33,3 +33,6 @@ Thumbs.db
 .hoopstreet/
 *.env
 credentials.json
+trash/
+*.log
+*.tmp
