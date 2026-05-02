@@ -2,29 +2,39 @@
 import os
 import sys
 import requests
+import json
 
-# Using your verified Gemini API Key
 API_KEY = "AIzaSyDHhh5zkL6NnEBD9SI-sLfl9Ur8yNA6PxA"
 
 def run_gemini_cli(prompt):
-    print(f"🤖 Gemini CLI Agent [v9.3.2] Analyzing...")
+    print(f"🤖 Gemini CLI Agent [v9.3.3] Analyzing...")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    headers = {'Content-Type': 'application/json'}
     payload = {
-        "contents": [{"parts": [{"text": prompt + " \nOutput only raw shell commands."}]}]
+        "contents": [{"parts": [{"text": f"{prompt}. Output only raw linux shell commands. No markdown, no explanations."}]}]
     }
+    
     try:
-        r = requests.post(url, json=payload)
-        commands = r.json()['candidates'][0]['content']['parts'][0]['text']
-        for line in commands.split('\n'):
-            if line.strip() and not line.startswith('```'):
-                print(f"🚀 Executing: {line}")
-                os.system(line)
+        response = requests.post(url, headers=headers, json=payload)
+        data = response.json()
+        
+        if 'candidates' in data:
+            commands = data['candidates'][0]['content']['parts'][0]['text']
+            # Clean markdown code blocks if AI included them
+            clean_commands = commands.replace('```bash', '').replace('```', '').strip()
+            
+            for line in clean_commands.split('\n'):
+                line = line.strip()
+                if line:
+                    print(f"🚀 Executing: {line}")
+                    os.system(line)
+        else:
+            print(f"❌ API Error: {json.dumps(data)}")
+            
     except Exception as e:
-        print(f"❌ Gemini CLI Error: {e}")
+        print(f"❌ System Error: {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        run_gemini_cli(" ".join(sys.argv[1:]))
-    else:
-        cmd = input("👉 Enter task for Gemini Agent: ")
-        run_gemini_cli(cmd)
+    task = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("👉 Enter task: ")
+    if task:
+        run_gemini_cli(task)
