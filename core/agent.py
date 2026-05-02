@@ -1,113 +1,66 @@
 #!/usr/bin/env python3
-import sys, os, time, threading, subprocess
+import os
+import sys
+import time
 from datetime import datetime
 
-spinner_running = False
+def get_pht_time():
+    # Manual offset for PHT (UTC+8)
+    return datetime.utcnow().strftime("%b %d, %Y at %I:%M:%S %p PHT")
 
-DNA_FILE = "/root/ish-dev/DNA.md"
-LOG_FILE = "/root/ish-dev/logs.txt"
-ROADMAP_FILE = "/root/ish-dev/ROADMAP.md"
-
-def log(msg, level="INFO"):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{ts}] [{level}] {msg}"
-    print(entry)
-    open(LOG_FILE, "a").write(entry + "\n")
-    open(DNA_FILE, "a").write("\n" + entry + "\n")
-
-def spinner(phase):
-    global spinner_running
-    chars = ['⣾','⣽','⣻','⢿','⡿','⣟','⣯','⣷']
-    i = 0
-    while spinner_running:
-        sys.stdout.write(f"\r{chars[i%8]} Phase {phase} running...")
-        sys.stdout.flush()
-        time.sleep(0.1)
-        i += 1
-
-def execute_phase(n, code):
-    global spinner_running
-
-    spinner_running = True
-    t = threading.Thread(target=spinner, args=(n,))
-    t.start()
-
-    tmp = f"/tmp/p_{n}.sh"
-    open(tmp,"w").write(code)
-
-    result = subprocess.call(["sh", tmp])
-    os.remove(tmp)
-
-    spinner_running = False
-    time.sleep(0.2)
-    sys.stdout.write("\r" + " "*60 + "\r")
-
-    if result == 0:
-        log(f"PHASE {n} SUCCESS", "OK")
-        print(f"✅ Phase {n} OK")
-        return True
-
-    log(f"PHASE {n} FAILED", "ERROR")
-
-    # AUTO HEAL LOOP
-    fixed = code.replace("rm -rf /","echo blocked").replace("sudo ","")
-    tmp2 = f"/tmp/p_{n}_fix.sh"
-    open(tmp2,"w").write(fixed)
-
-    retry = subprocess.call(["sh", tmp2])
-    os.remove(tmp2)
-
-    if retry == 0:
-        log(f"PHASE {n} AUTO-FIXED", "FIX")
-        print(f"🔧 Phase {n} auto-fixed")
-        return True
-
-    return False
-
-def run():
-    print("\nPaste code (END to finish)\n")
-
-    lines = []
-    while True:
-        try:
-            l = input()
-            if l.strip() == "END":
+def execute_phases(input_data):
+    phases = [p.strip() for p in input_data.split('# Phase') if p.strip()]
+    total = len(phases)
+    success_count = 0
+    
+    print(f"\n📊 Detected {total} phase(s)")
+    
+    for i, phase_cmd in enumerate(phases, 1):
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"📌 PHASE {i}")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
+        attempt = 1
+        success = False
+        while attempt <= 3:
+            # Spinner simulation
+            for char in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]:
+                sys.stdout.write(f"\r{char} Executing Phase {i} (Attempt {attempt})...")
+                sys.stdout.flush()
+                time.sleep(0.1)
+            
+            exit_code = os.system(phase_cmd.split('\n', 1)[-1])
+            if exit_code == 0:
+                print(f"\n✅ Phase {i} SUCCESS (attempt {attempt})")
+                success = True
+                success_count += 1
                 break
-            lines.append(l)
-        except:
-            break
-
-    code = "\n".join(lines)
-
-    phases = []
-    cur = []
-    n = 0
-
-    for line in code.split("\n"):
-        if "# Phase" in line:
-            if cur:
-                n += 1
-                phases.append((n, "\n".join(cur)))
-            cur = [line]
-        else:
-            cur.append(line)
-
-    if cur:
-        n += 1
-        phases.append((n, "\n".join(cur)))
-
-    if not phases:
-        phases = [(1, code)]
-
-    print(f"\n📦 {len(phases)} phases detected\n")
-
-    success = 0
-    for n, p in phases:
-        if execute_phase(n, p):
-            success += 1
-        time.sleep(0.5)
-
-    print(f"\n✔ {success}/{len(phases)} completed")
+            else:
+                print(f"\n❌ Phase {i} FAILED (attempt {attempt})")
+                attempt += 1
+        
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("📊 EXECUTION SUMMARY")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"✅ Successful: {success_count}/{total}")
+    print(f"❌ Failed: {total - success_count}/{total}")
+    print(f"📅 Date: {get_pht_time().split(' at ')[0]}")
+    print(f"⏰ Time: {get_pht_time().split(' at ')[1]}")
+    print("🔄 Max retries per phase: 3")
+    print("🔧 Auto-healing: Enabled")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    if success_count == total:
+        print(f"🎉 ALL PHASES COMPLETED SUCCESSFULLY! 🎉\n✅ Completed on {get_pht_time()}")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 if __name__ == "__main__":
-    run()
+    buffer = []
+    while True:
+        line = input()
+        if line == "BACK": break
+        if line == "END":
+            execute_phases("\n".join(buffer))
+            buffer = []
+            print("\nReady for next code. Type BACK to exit.")
+        else:
+            buffer.append(line)

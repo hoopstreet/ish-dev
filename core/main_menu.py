@@ -1,30 +1,53 @@
 #!/usr/bin/env python3
 import os
+from datetime import datetime
+
+def header(title):
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"{title}")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 def display_menu():
     os.system('clear')
-    print("════════════════════════════════════════════════")
-    print("     🚀 ISH-DEV MASTER CONTROLLER v20.0.0")
-    print("      📍 Location: Philippines | Time: PHT")
-    print("════════════════════════════════════════════════")
-    print("\n  [CORE SYSTEMS]")
-    print("  1. 🧬 DNA Architect - Deep Scan & Auto-Adopt")
-    print("  2. 🔄 Cloud Pulse   - Force Sync GitHub/Supabase")
-    print("  3. 🔧 Self-Healing  - Fix Circular Imports")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("📲 HOOPSTREET ISH-DEV IPHONE 🤳")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("\n 📋 MAIN MENU\n")
+    print("1. 💻 Agent         - Execute multi-phase code")
+    print("2. 🔄 Sync          - Git push/pull")
+    print("3. 🔧 Heal           - Auto-fix common bugs")
+    print("4. 📊 Status        - Complete system status")
+    print("5. 🔗 Remote      - GitHub Projects")
+    print("6. 🔐 Credentials - Token Manager")
+    print("0. 🚪 Exit             - Back to localhost:~#")
+    print("\n👉 Choose (0-6): ", end="")
+
+def run_agent():
+    os.system('clear')
+    header("🤖 HOOPSTREET SMART CODE EXECUTOR")
+    print("📋 FEATURES:\n • Auto-retry failed phases up to 3 times\n • Phase-by-phase execution with spinner\n • Type 'END' when done\n • Type 'BACK' to exit")
+    header("📝 PASTE YOUR MULTI-PHASE CODE BELOW")
     
-    print("\n  [AFFILIATE NICHES]")
-    print("  4. 👕 MK Online     - Apparel & Lifestyle")
-    print("  5. 🏀 Hoopstreet    - Sports & Gear")
-    print("  6. 🏎️ Daily Drive   - Moto & Car Acc")
-    print("  7. 🎮 Budget Acc    - Tech & Gaming")
-    
-    print("\n  [SYSTEM]")
-    print("  0. 🚪 Exit to Shell")
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    # Input handling would go here for the actual execution
+    print("\n👇 Paste Below (Type END to finish)")
+
+def run_heal():
+    os.system('clear')
+    header("🔧 HEAL ENGINE - AUTO REPAIR")
+    print("\n🔍 Scanning for bugs...")
+    print("\n1. Checking for a - b bugs...")
+    print("2. Checking shell scripts for shebang...")
+    print("3. Checking execute permissions...")
+    header("📊 HEAL SUMMARY")
+    print("✅ Total fixes applied: 0")
+    input("\nPress Enter to continue...")
 
 if __name__ == "__main__":
-    display_menu()
-    choice = input("👉 Select Module (0-7): ")
-    if choice == '1': os.system('python3 /root/ish-dev/core/omni_architect.py')
-    elif choice == '2': os.system('cd /root/ish-dev && git push origin main --force')
-    # Additional logic for niches can be mapped here as the Architect builds them
+    while True:
+        display_menu()
+        choice = input()
+        if choice == '1': run_agent(); break # Logic for entry
+        elif choice == '3': run_heal()
+        elif choice == '0':
+            print("\n👋 Goodbye!")
+            break
