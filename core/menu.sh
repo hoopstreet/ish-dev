@@ -2,7 +2,7 @@
 while true; do
     clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0.4"
+    echo "📲 HOOPSTREET ISH-DEV IPHONE 🤳 v10.0.6"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo " 📋 MAIN MENU"
@@ -21,11 +21,8 @@ while true; do
 
     case "$choice" in
         1) 
-            echo ""
-            echo "🤖 Launching AI Agent..."
-            sleep 1
             clear
-            /root/ish-dev/launch_agent.sh
+            python3 /root/ish-dev/core/agent_self_improving.py
             ;;
         2) 
             /root/ish-dev/core/sync.sh
