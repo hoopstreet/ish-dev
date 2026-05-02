@@ -1,1386 +1,1449 @@
-"""distutils.ccompiler
+# -*- coding: utf-8 -*-
+# Copyright (c) The python-semanticversion project
+# This code is distributed under the two-clause BSD License.
 
-Contains Compiler, an abstract base class that defines the interface
-for the Distutils compiler abstraction model."""
-
-from __future__ import annotations
-
-import os
-import pathlib
+import functools
 import re
-import sys
 import warnings
-from collections.abc import Callable, Iterable, MutableSequence, Sequence
-from typing import (
-    TYPE_CHECKING,
-    ClassVar,
-    Literal,
-    TypeVar,
-    Union,
-    overload,
-)
 
-from more_itertools import always_iterable
 
-from ..._log import log
-from ..._modified import newer_group
-from ...dir_util import mkpath
-from ...errors import (
-    DistutilsModuleError,
-    DistutilsPlatformError,
-)
-from ...file_util import move_file
-from ...spawn import spawn
-from ...util import execute, is_mingw, split_quoted
-from .errors import (
-    CompileError,
-    LinkError,
-    UnknownFileType,
-)
+def _has_leading_zero(value):
+    return (value
+            and value[0] == '0'
+            and value.isdigit()
+            and value != '0')
 
-if TYPE_CHECKING:
-    from typing_extensions import TypeAlias, TypeVarTuple, Unpack
 
-    _Ts = TypeVarTuple("_Ts")
+class MaxIdentifier(object):
+    __slots__ = []
 
-_Macro: TypeAlias = Union[tuple[str], tuple[str, Union[str, None]]]
-_StrPathT = TypeVar("_StrPathT", bound="str | os.PathLike[str]")
-_BytesPathT = TypeVar("_BytesPathT", bound="bytes | os.PathLike[bytes]")
+    def __repr__(self):
+        return 'MaxIdentifier()'
 
+    def __eq__(self, other):
+        return isinstance(other, self.__class__)
 
-class Compiler:
-    """Abstract base class to define the interface that must be implemented
-    by real compiler classes.  Also has some utility methods used by
-    several compiler classes.
 
-    The basic idea behind a compiler abstraction class is that each
-    instance can be used for all the compile/link steps in building a
-    single project.  Thus, attributes common to all of those compile and
-    link steps -- include directories, macros to define, libraries to link
-    against, etc. -- are attributes of the compiler instance.  To allow for
-    variability in how individual files are treated, most of those
-    attributes may be varied on a per-compilation or per-link basis.
-    """
+@functools.total_ordering
+class NumericIdentifier(object):
+    __slots__ = ['value']
 
-    # 'compiler_type' is a class attribute that identifies this class.  It
-    # keeps code that wants to know what kind of compiler it's dealing with
-    # from having to import all possible compiler classes just to do an
-    # 'isinstance'.  In concrete CCompiler subclasses, 'compiler_type'
-    # should really, really be one of the keys of the 'compiler_class'
-    # dictionary (see below -- used by the 'new_compiler()' factory
-    # function) -- authors of new compiler interface classes are
-    # responsible for updating 'compiler_class'!
-    compiler_type: ClassVar[str] = None  # type: ignore[assignment]
+    def __init__(self, value):
+        self.value = int(value)
 
-    # XXX things not handled by this compiler abstraction model:
-    #   * client can't provide additional options for a compiler,
-    #     e.g. warning, optimization, debugging flags.  Perhaps this
-    #     should be the domain of concrete compiler abstraction classes
-    #     (UnixCCompiler, MSVCCompiler, etc.) -- or perhaps the base
-    #     class should have methods for the common ones.
-    #   * can't completely override the include or library searchg
-    #     path, ie. no "cc -I -Idir1 -Idir2" or "cc -L -Ldir1 -Ldir2".
-    #     I'm not sure how widely supported this is even by Unix
-    #     compilers, much less on other platforms.  And I'm even less
-    #     sure how useful it is; maybe for cross-compiling, but
-    #     support for that is a ways off.  (And anyways, cross
-    #     compilers probably have a dedicated binary with the
-    #     right paths compiled in.  I hope.)
-    #   * can't do really freaky things with the library list/library
-    #     dirs, e.g. "-Ldir1 -lfoo -Ldir2 -lfoo" to link against
-    #     different versions of libfoo.a in different locations.  I
-    #     think this is useless without the ability to null out the
-    #     library search path anyways.
+    def __repr__(self):
+        return 'NumericIdentifier(%r)' % self.value
 
-    executables: ClassVar[dict]
+    def __eq__(self, other):
+        if isinstance(other, NumericIdentifier):
+            return self.value == other.value
+        return NotImplemented
 
-    # Subclasses that rely on the standard filename generation methods
-    # implemented below should override these; see the comment near
-    # those methods ('object_filenames()' et. al.) for details:
-    src_extensions: ClassVar[list[str] | None] = None
-    obj_extension: ClassVar[str | None] = None
-    static_lib_extension: ClassVar[str | None] = None
-    shared_lib_extension: ClassVar[str | None] = None
-    static_lib_format: ClassVar[str | None] = None  # format string
-    shared_lib_format: ClassVar[str | None] = None  # prob. same as static_lib_format
-    exe_extension: ClassVar[str | None] = None
-
-    # Default language settings. language_map is used to detect a source
-    # file or Extension target language, checking source filenames.
-    # language_order is used to detect the language precedence, when deciding
-    # what language to use when mixing source types. For example, if some
-    # extension has two files with ".c" extension, and one with ".cpp", it
-    # is still linked as c++.
-    language_map: ClassVar[dict[str, str]] = {
-        ".c": "c",
-        ".cc": "c++",
-        ".cpp": "c++",
-        ".cxx": "c++",
-        ".m": "objc",
-    }
-    language_order: ClassVar[list[str]] = ["c++", "objc", "c"]
-
-    include_dirs: list[str] = []
-    """
-    include dirs specific to this compiler class
-    """
-
-    library_dirs: list[str] = []
-    """
-    library dirs specific to this compiler class
-    """
-
-    def __init__(self, verbose: bool = False, force: bool = False) -> None:
-        self.force = force
-        self.verbose = verbose
-
-        # 'output_dir': a common output directory for object, library,
-        # shared object, and shared library files
-        self.output_dir: str | None = None
-
-        # 'macros': a list of macro definitions (or undefinitions).  A
-        # macro definition is a 2-tuple (name, value), where the value is
-        # either a string or None (no explicit value).  A macro
-        # undefinition is a 1-tuple (name,).
-        self.macros: list[_Macro] = []
-
-        # 'include_dirs': a list of directories to search for include files
-        self.include_dirs = []
-
-        # 'libraries': a list of libraries to include in any link
-        # (library names, not filenames: eg. "foo" not "libfoo.a")
-        self.libraries: list[str] = []
-
-        # 'library_dirs': a list of directories to search for libraries
-        self.library_dirs = []
-
-        # 'runtime_library_dirs': a list of directories to search for
-        # shared libraries/objects at runtime
-        self.runtime_library_dirs: list[str] = []
-
-        # 'objects': a list of object files (or similar, such as explicitly
-        # named library files) to include on any link
-        self.objects: list[str] = []
-
-        for key in self.executables.keys():
-            self.set_executable(key, self.executables[key])
-
-    def set_executables(self, **kwargs: str) -> None:
-        """Define the executables (and options for them) that will be run
-        to perform the various stages of compilation.  The exact set of
-        executables that may be specified here depends on the compiler
-        class (via the 'executables' class attribute), but most will have:
-          compiler      the C/C++ compiler
-          linker_so     linker used to create shared objects and libraries
-          linker_exe    linker used to create binary executables
-          archiver      static library creator
-
-        On platforms with a command-line (Unix, DOS/Windows), each of these
-        is a string that will be split into executable name and (optional)
-        list of arguments.  (Splitting the string is done similarly to how
-        Unix shells operate: words are delimited by spaces, but quotes and
-        backslashes can override this.  See
-        'distutils.util.split_quoted()'.)
-        """
-
-        # Note that some CCompiler implementation classes will define class
-        # attributes 'cpp', 'cc', etc. with hard-coded executable names;
-        # this is appropriate when a compiler class is for exactly one
-        # compiler/OS combination (eg. MSVCCompiler).  Other compiler
-        # classes (UnixCCompiler, in particular) are driven by information
-        # discovered at run-time, since there are many different ways to do
-        # basically the same things with Unix C compilers.
-
-        for key in kwargs:
-            if key not in self.executables:
-                raise ValueError(
-                    f"unknown executable '{key}' for class {self.__class__.__name__}"
-                )
-            self.set_executable(key, kwargs[key])
-
-    def set_executable(self, key, value):
-        if isinstance(value, str):
-            setattr(self, key, split_quoted(value))
-        else:
-            setattr(self, key, value)
-
-    def _find_macro(self, name):
-        i = 0
-        for defn in self.macros:
-            if defn[0] == name:
-                return i
-            i += 1
-        return None
-
-    def _check_macro_definitions(self, definitions):
-        """Ensure that every element of 'definitions' is valid."""
-        for defn in definitions:
-            self._check_macro_definition(*defn)
-
-    def _check_macro_definition(self, defn):
-        """
-        Raise a TypeError if defn is not valid.
-
-        A valid definition is either a (name, value) 2-tuple or a (name,) tuple.
-        """
-        if not isinstance(defn, tuple) or not self._is_valid_macro(*defn):
-            raise TypeError(
-                f"invalid macro definition '{defn}': "
-                "must be tuple (string,), (string, string), or (string, None)"
-            )
-
-    @staticmethod
-    def _is_valid_macro(name, value=None):
-        """
-        A valid macro is a ``name : str`` and a ``value : str | None``.
-
-        >>> Compiler._is_valid_macro('foo', None)
-        True
-        """
-        return isinstance(name, str) and isinstance(value, (str, type(None)))
-
-    # -- Bookkeeping methods -------------------------------------------
-
-    def define_macro(self, name: str, value: str | None = None) -> None:
-        """Define a preprocessor macro for all compilations driven by this
-        compiler object.  The optional parameter 'value' should be a
-        string; if it is not supplied, then the macro will be defined
-        without an explicit value and the exact outcome depends on the
-        compiler used (XXX true? does ANSI say anything about this?)
-        """
-        # Delete from the list of macro definitions/undefinitions if
-        # already there (so that this one will take precedence).
-        i = self._find_macro(name)
-        if i is not None:
-            del self.macros[i]
-
-        self.macros.append((name, value))
-
-    def undefine_macro(self, name: str) -> None:
-        """Undefine a preprocessor macro for all compilations driven by
-        this compiler object.  If the same macro is defined by
-        'define_macro()' and undefined by 'undefine_macro()' the last call
-        takes precedence (including multiple redefinitions or
-        undefinitions).  If the macro is redefined/undefined on a
-        per-compilation basis (ie. in the call to 'compile()'), then that
-        takes precedence.
-        """
-        # Delete from the list of macro definitions/undefinitions if
-        # already there (so that this one will take precedence).
-        i = self._find_macro(name)
-        if i is not None:
-            del self.macros[i]
-
-        undefn = (name,)
-        self.macros.append(undefn)
-
-    def add_include_dir(self, dir: str) -> None:
-        """Add 'dir' to the list of directories that will be searched for
-        header files.  The compiler is instructed to search directories in
-        the order in which they are supplied by successive calls to
-        'add_include_dir()'.
-        """
-        self.include_dirs.append(dir)
-
-    def set_include_dirs(self, dirs: list[str]) -> None:
-        """Set the list of directories that will be searched to 'dirs' (a
-        list of strings).  Overrides any preceding calls to
-        'add_include_dir()'; subsequence calls to 'add_include_dir()' add
-        to the list passed to 'set_include_dirs()'.  This does not affect
-        any list of standard include directories that the compiler may
-        search by default.
-        """
-        self.include_dirs = dirs[:]
-
-    def add_library(self, libname: str) -> None:
-        """Add 'libname' to the list of libraries that will be included in
-        all links driven by this compiler object.  Note that 'libname'
-        should *not* be the name of a file containing a library, but the
-        name of the library itself: the actual filename will be inferred by
-        the linker, the compiler, or the compiler class (depending on the
-        platform).
-
-        The linker will be instructed to link against libraries in the
-        order they were supplied to 'add_library()' and/or
-        'set_libraries()'.  It is perfectly valid to duplicate library
-        names; the linker will be instructed to link against libraries as
-        many times as they are mentioned.
-        """
-        self.libraries.append(libname)
-
-    def set_libraries(self, libnames: list[str]) -> None:
-        """Set the list of libraries to be included in all links driven by
-        this compiler object to 'libnames' (a list of strings).  This does
-        not affect any standard system libraries that the linker may
-        include by default.
-        """
-        self.libraries = libnames[:]
-
-    def add_library_dir(self, dir: str) -> None:
-        """Add 'dir' to the list of directories that will be searched for
-        libraries specified to 'add_library()' and 'set_libraries()'.  The
-        linker will be instructed to search for libraries in the order they
-        are supplied to 'add_library_dir()' and/or 'set_library_dirs()'.
-        """
-        self.library_dirs.append(dir)
-
-    def set_library_dirs(self, dirs: list[str]) -> None:
-        """Set the list of library search directories to 'dirs' (a list of
-        strings).  This does not affect any standard library search path
-        that the linker may search by default.
-        """
-        self.library_dirs = dirs[:]
-
-    def add_runtime_library_dir(self, dir: str) -> None:
-        """Add 'dir' to the list of directories that will be searched for
-        shared libraries at runtime.
-        """
-        self.runtime_library_dirs.append(dir)
-
-    def set_runtime_library_dirs(self, dirs: list[str]) -> None:
-        """Set the list of directories to search for shared libraries at
-        runtime to 'dirs' (a list of strings).  This does not affect any
-        standard search path that the runtime linker may search by
-        default.
-        """
-        self.runtime_library_dirs = dirs[:]
-
-    def add_link_object(self, object: str) -> None:
-        """Add 'object' to the list of object files (or analogues, such as
-        explicitly named library files or the output of "resource
-        compilers") to be included in every link driven by this compiler
-        object.
-        """
-        self.objects.append(object)
-
-    def set_link_objects(self, objects: list[str]) -> None:
-        """Set the list of object files (or analogues) to be included in
-        every link to 'objects'.  This does not affect any standard object
-        files that the linker may include by default (such as system
-        libraries).
-        """
-        self.objects = objects[:]
-
-    # -- Private utility methods --------------------------------------
-    # (here for the convenience of subclasses)
-
-    # Helper method to prep compiler in subclass compile() methods
-
-    def _setup_compile(
-        self,
-        outdir: str | None,
-        macros: list[_Macro] | None,
-        incdirs: list[str] | tuple[str, ...] | None,
-        sources,
-        depends,
-        extra,
-    ):
-        """Process arguments and decide which source files to compile."""
-        outdir, macros, incdirs = self._fix_compile_args(outdir, macros, incdirs)
-
-        if extra is None:
-            extra = []
-
-        # Get the list of expected output (object) files
-        objects = self.object_filenames(sources, strip_dir=False, output_dir=outdir)
-        assert len(objects) == len(sources)
-
-        pp_opts = gen_preprocess_options(macros, incdirs)
-
-        build = {}
-        for i in range(len(sources)):
-            src = sources[i]
-            obj = objects[i]
-            ext = os.path.splitext(src)[1]
-            self.mkpath(os.path.dirname(obj))
-            build[obj] = (src, ext)
-
-        return macros, objects, extra, pp_opts, build
-
-    def _get_cc_args(self, pp_opts, debug, before):
-        # works for unixccompiler, cygwinccompiler
-        cc_args = pp_opts + ['-c']
-        if debug:
-            cc_args[:0] = ['-g']
-        if before:
-            cc_args[:0] = before
-        return cc_args
-
-    def _fix_compile_args(
-        self,
-        output_dir: str | None,
-        macros: list[_Macro] | None,
-        include_dirs: list[str] | tuple[str, ...] | None,
-    ) -> tuple[str, list[_Macro], list[str]]:
-        """Typecheck and fix-up some of the arguments to the 'compile()'
-        method, and return fixed-up values.  Specifically: if 'output_dir'
-        is None, replaces it with 'self.output_dir'; ensures that 'macros'
-        is a list, and augments it with 'self.macros'; ensures that
-        'include_dirs' is a list, and augments it with 'self.include_dirs'.
-        Guarantees that the returned values are of the correct type,
-        i.e. for 'output_dir' either string or None, and for 'macros' and
-        'include_dirs' either list or None.
-        """
-        if output_dir is None:
-            output_dir = self.output_dir
-        elif not isinstance(output_dir, str):
-            raise TypeError("'output_dir' must be a string or None")
-
-        if macros is None:
-            macros = list(self.macros)
-        elif isinstance(macros, list):
-            macros = macros + (self.macros or [])
-        else:
-            raise TypeError("'macros' (if supplied) must be a list of tuples")
-
-        if include_dirs is None:
-            include_dirs = list(self.include_dirs)
-        elif isinstance(include_dirs, (list, tuple)):
-            include_dirs = list(include_dirs) + (self.include_dirs or [])
-        else:
-            raise TypeError("'include_dirs' (if supplied) must be a list of strings")
-
-        # add include dirs for class
-        include_dirs += self.__class__.include_dirs
-
-        return output_dir, macros, include_dirs
-
-    def _prep_compile(self, sources, output_dir, depends=None):
-        """Decide which source files must be recompiled.
-
-        Determine the list of object files corresponding to 'sources',
-        and figure out which ones really need to be recompiled.
-        Return a list of all object files and a dictionary telling
-        which source files can be skipped.
-        """
-        # Get the list of expected output (object) files
-        objects = self.object_filenames(sources, output_dir=output_dir)
-        assert len(objects) == len(sources)
-
-        # Return an empty dict for the "which source files can be skipped"
-        # return value to preserve API compatibility.
-        return objects, {}
-
-    def _fix_object_args(
-        self, objects: list[str] | tuple[str, ...], output_dir: str | None
-    ) -> tuple[list[str], str]:
-        """Typecheck and fix up some arguments supplied to various methods.
-        Specifically: ensure that 'objects' is a list; if output_dir is
-        None, replace with self.output_dir.  Return fixed versions of
-        'objects' and 'output_dir'.
-        """
-        if not isinstance(objects, (list, tuple)):
-            raise TypeError("'objects' must be a list or tuple of strings")
-        objects = list(objects)
-
-        if output_dir is None:
-            output_dir = self.output_dir
-        elif not isinstance(output_dir, str):
-            raise TypeError("'output_dir' must be a string or None")
-
-        return (objects, output_dir)
-
-    def _fix_lib_args(
-        self,
-        libraries: list[str] | tuple[str, ...] | None,
-        library_dirs: list[str] | tuple[str, ...] | None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None,
-    ) -> tuple[list[str], list[str], list[str]]:
-        """Typecheck and fix up some of the arguments supplied to the
-        'link_*' methods.  Specifically: ensure that all arguments are
-        lists, and augment them with their permanent versions
-        (eg. 'self.libraries' augments 'libraries').  Return a tuple with
-        fixed versions of all arguments.
-        """
-        if libraries is None:
-            libraries = list(self.libraries)
-        elif isinstance(libraries, (list, tuple)):
-            libraries = list(libraries) + (self.libraries or [])
-        else:
-            raise TypeError("'libraries' (if supplied) must be a list of strings")
-
-        if library_dirs is None:
-            library_dirs = list(self.library_dirs)
-        elif isinstance(library_dirs, (list, tuple)):
-            library_dirs = list(library_dirs) + (self.library_dirs or [])
-        else:
-            raise TypeError("'library_dirs' (if supplied) must be a list of strings")
-
-        # add library dirs for class
-        library_dirs += self.__class__.library_dirs
-
-        if runtime_library_dirs is None:
-            runtime_library_dirs = list(self.runtime_library_dirs)
-        elif isinstance(runtime_library_dirs, (list, tuple)):
-            runtime_library_dirs = list(runtime_library_dirs) + (
-                self.runtime_library_dirs or []
-            )
-        else:
-            raise TypeError(
-                "'runtime_library_dirs' (if supplied) must be a list of strings"
-            )
-
-        return (libraries, library_dirs, runtime_library_dirs)
-
-    def _need_link(self, objects, output_file):
-        """Return true if we need to relink the files listed in 'objects'
-        to recreate 'output_file'.
-        """
-        if self.force:
+    def __lt__(self, other):
+        if isinstance(other, MaxIdentifier):
             return True
-        newer = newer_group(objects, output_file)
-        return newer
-
-    def detect_language(self, sources: str | list[str]) -> str | None:
-        """Detect the language of a given file, or list of files. Uses
-        language_map, and language_order to do the job.
-        """
-        if not isinstance(sources, list):
-            sources = [sources]
-        lang = None
-        index = len(self.language_order)
-        for source in sources:
-            base, ext = os.path.splitext(source)
-            extlang = self.language_map.get(ext)
-            try:
-                extindex = self.language_order.index(extlang)
-                if extindex < index:
-                    lang = extlang
-                    index = extindex
-            except ValueError:
-                pass
-        return lang
-
-    # -- Worker methods ------------------------------------------------
-    # (must be implemented by subclasses)
-
-    def preprocess(
-        self,
-        source: str | os.PathLike[str],
-        output_file: str | os.PathLike[str] | None = None,
-        macros: list[_Macro] | None = None,
-        include_dirs: list[str] | tuple[str, ...] | None = None,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: Iterable[str] | None = None,
-    ):
-        """Preprocess a single C/C++ source file, named in 'source'.
-        Output will be written to file named 'output_file', or stdout if
-        'output_file' not supplied.  'macros' is a list of macro
-        definitions as for 'compile()', which will augment the macros set
-        with 'define_macro()' and 'undefine_macro()'.  'include_dirs' is a
-        list of directory names that will be added to the default list.
-
-        Raises PreprocessError on failure.
-        """
-        pass
-
-    def compile(
-        self,
-        sources: Sequence[str | os.PathLike[str]],
-        output_dir: str | None = None,
-        macros: list[_Macro] | None = None,
-        include_dirs: list[str] | tuple[str, ...] | None = None,
-        debug: bool = False,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: list[str] | None = None,
-        depends: list[str] | tuple[str, ...] | None = None,
-    ) -> list[str]:
-        """Compile one or more source files.
-
-        'sources' must be a list of filenames, most likely C/C++
-        files, but in reality anything that can be handled by a
-        particular compiler and compiler class (eg. MSVCCompiler can
-        handle resource files in 'sources').  Return a list of object
-        filenames, one per source filename in 'sources'.  Depending on
-        the implementation, not all source files will necessarily be
-        compiled, but all corresponding object filenames will be
-        returned.
-
-        If 'output_dir' is given, object files will be put under it, while
-        retaining their original path component.  That is, "foo/bar.c"
-        normally compiles to "foo/bar.o" (for a Unix implementation); if
-        'output_dir' is "build", then it would compile to
-        "build/foo/bar.o".
-
-        'macros', if given, must be a list of macro definitions.  A macro
-        definition is either a (name, value) 2-tuple or a (name,) 1-tuple.
-        The former defines a macro; if the value is None, the macro is
-        defined without an explicit value.  The 1-tuple case undefines a
-        macro.  Later definitions/redefinitions/ undefinitions take
-        precedence.
-
-        'include_dirs', if given, must be a list of strings, the
-        directories to add to the default include file search path for this
-        compilation only.
-
-        'debug' is a boolean; if true, the compiler will be instructed to
-        output debug symbols in (or alongside) the object file(s).
-
-        'extra_preargs' and 'extra_postargs' are implementation- dependent.
-        On platforms that have the notion of a command-line (e.g. Unix,
-        DOS/Windows), they are most likely lists of strings: extra
-        command-line arguments to prepend/append to the compiler command
-        line.  On other platforms, consult the implementation class
-        documentation.  In any event, they are intended as an escape hatch
-        for those occasions when the abstract compiler framework doesn't
-        cut the mustard.
-
-        'depends', if given, is a list of filenames that all targets
-        depend on.  If a source file is older than any file in
-        depends, then the source file will be recompiled.  This
-        supports dependency tracking, but only at a coarse
-        granularity.
-
-        Raises CompileError on failure.
-        """
-        # A concrete compiler class can either override this method
-        # entirely or implement _compile().
-        macros, objects, extra_postargs, pp_opts, build = self._setup_compile(
-            output_dir, macros, include_dirs, sources, depends, extra_postargs
-        )
-        cc_args = self._get_cc_args(pp_opts, debug, extra_preargs)
-
-        for obj in objects:
-            try:
-                src, ext = build[obj]
-            except KeyError:
-                continue
-            self._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
-
-        # Return *all* object filenames, not just the ones we just built.
-        return objects
-
-    def _compile(self, obj, src, ext, cc_args, extra_postargs, pp_opts):
-        """Compile 'src' to product 'obj'."""
-        # A concrete compiler class that does not override compile()
-        # should implement _compile().
-        pass
-
-    def create_static_lib(
-        self,
-        objects: list[str] | tuple[str, ...],
-        output_libname: str,
-        output_dir: str | None = None,
-        debug: bool = False,
-        target_lang: str | None = None,
-    ) -> None:
-        """Link a bunch of stuff together to create a static library file.
-        The "bunch of stuff" consists of the list of object files supplied
-        as 'objects', the extra object files supplied to
-        'add_link_object()' and/or 'set_link_objects()', the libraries
-        supplied to 'add_library()' and/or 'set_libraries()', and the
-        libraries supplied as 'libraries' (if any).
-
-        'output_libname' should be a library name, not a filename; the
-        filename will be inferred from the library name.  'output_dir' is
-        the directory where the library file will be put.
-
-        'debug' is a boolean; if true, debugging information will be
-        included in the library (note that on most platforms, it is the
-        compile step where this matters: the 'debug' flag is included here
-        just for consistency).
-
-        'target_lang' is the target language for which the given objects
-        are being compiled. This allows specific linkage time treatment of
-        certain languages.
-
-        Raises LibError on failure.
-        """
-        pass
-
-    # values for target_desc parameter in link()
-    SHARED_OBJECT = "shared_object"
-    SHARED_LIBRARY = "shared_library"
-    EXECUTABLE = "executable"
-
-    def link(
-        self,
-        target_desc: str,
-        objects: list[str] | tuple[str, ...],
-        output_filename: str,
-        output_dir: str | None = None,
-        libraries: list[str] | tuple[str, ...] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None = None,
-        export_symbols: Iterable[str] | None = None,
-        debug: bool = False,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: list[str] | None = None,
-        build_temp: str | os.PathLike[str] | None = None,
-        target_lang: str | None = None,
-    ):
-        """Link a bunch of stuff together to create an executable or
-        shared library file.
-
-        The "bunch of stuff" consists of the list of object files supplied
-        as 'objects'.  'output_filename' should be a filename.  If
-        'output_dir' is supplied, 'output_filename' is relative to it
-        (i.e. 'output_filename' can provide directory components if
-        needed).
-
-        'libraries' is a list of libraries to link against.  These are
-        library names, not filenames, since they're translated into
-        filenames in a platform-specific way (eg. "foo" becomes "libfoo.a"
-        on Unix and "foo.lib" on DOS/Windows).  However, they can include a
-        directory component, which means the linker will look in that
-        specific directory rather than searching all the normal locations.
-
-        'library_dirs', if supplied, should be a list of directories to
-        search for libraries that were specified as bare library names
-        (ie. no directory component).  These are on top of the system
-        default and those supplied to 'add_library_dir()' and/or
-        'set_library_dirs()'.  'runtime_library_dirs' is a list of
-        directories that will be embedded into the shared library and used
-        to search for other shared libraries that *it* depends on at
-        run-time.  (This may only be relevant on Unix.)
-
-        'export_symbols' is a list of symbols that the shared library will
-        export.  (This appears to be relevant only on Windows.)
-
-        'debug' is as for 'compile()' and 'create_static_lib()', with the
-        slight distinction that it actually matters on most platforms (as
-        opposed to 'create_static_lib()', which includes a 'debug' flag
-        mostly for form's sake).
-
-        'extra_preargs' and 'extra_postargs' are as for 'compile()' (except
-        of course that they supply command-line arguments for the
-        particular linker being used).
-
-        'target_lang' is the target language for which the given objects
-        are being compiled. This allows specific linkage time treatment of
-        certain languages.
-
-        Raises LinkError on failure.
-        """
-        raise NotImplementedError
-
-    # Old 'link_*()' methods, rewritten to use the new 'link()' method.
-
-    def link_shared_lib(
-        self,
-        objects: list[str] | tuple[str, ...],
-        output_libname: str,
-        output_dir: str | None = None,
-        libraries: list[str] | tuple[str, ...] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None = None,
-        export_symbols: Iterable[str] | None = None,
-        debug: bool = False,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: list[str] | None = None,
-        build_temp: str | os.PathLike[str] | None = None,
-        target_lang: str | None = None,
-    ):
-        self.link(
-            Compiler.SHARED_LIBRARY,
-            objects,
-            self.library_filename(output_libname, lib_type='shared'),
-            output_dir,
-            libraries,
-            library_dirs,
-            runtime_library_dirs,
-            export_symbols,
-            debug,
-            extra_preargs,
-            extra_postargs,
-            build_temp,
-            target_lang,
-        )
-
-    def link_shared_object(
-        self,
-        objects: list[str] | tuple[str, ...],
-        output_filename: str,
-        output_dir: str | None = None,
-        libraries: list[str] | tuple[str, ...] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None = None,
-        export_symbols: Iterable[str] | None = None,
-        debug: bool = False,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: list[str] | None = None,
-        build_temp: str | os.PathLike[str] | None = None,
-        target_lang: str | None = None,
-    ):
-        self.link(
-            Compiler.SHARED_OBJECT,
-            objects,
-            output_filename,
-            output_dir,
-            libraries,
-            library_dirs,
-            runtime_library_dirs,
-            export_symbols,
-            debug,
-            extra_preargs,
-            extra_postargs,
-            build_temp,
-            target_lang,
-        )
-
-    def link_executable(
-        self,
-        objects: list[str] | tuple[str, ...],
-        output_progname: str,
-        output_dir: str | None = None,
-        libraries: list[str] | tuple[str, ...] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None = None,
-        debug: bool = False,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: list[str] | None = None,
-        target_lang: str | None = None,
-    ):
-        self.link(
-            Compiler.EXECUTABLE,
-            objects,
-            self.executable_filename(output_progname),
-            output_dir,
-            libraries,
-            library_dirs,
-            runtime_library_dirs,
-            None,
-            debug,
-            extra_preargs,
-            extra_postargs,
-            None,
-            target_lang,
-        )
-
-    # -- Miscellaneous methods -----------------------------------------
-    # These are all used by the 'gen_lib_options() function; there is
-    # no appropriate default implementation so subclasses should
-    # implement all of these.
-
-    def library_dir_option(self, dir: str) -> str:
-        """Return the compiler option to add 'dir' to the list of
-        directories searched for libraries.
-        """
-        raise NotImplementedError
-
-    def runtime_library_dir_option(self, dir: str) -> str:
-        """Return the compiler option to add 'dir' to the list of
-        directories searched for runtime libraries.
-        """
-        raise NotImplementedError
-
-    def library_option(self, lib: str) -> str:
-        """Return the compiler option to add 'lib' to the list of libraries
-        linked into the shared library or executable.
-        """
-        raise NotImplementedError
-
-    def has_function(  # noqa: C901
-        self,
-        funcname: str,
-        includes: Iterable[str] | None = None,
-        include_dirs: list[str] | tuple[str, ...] | None = None,
-        libraries: list[str] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-    ) -> bool:
-        """Return a boolean indicating whether funcname is provided as
-        a symbol on the current platform.  The optional arguments can
-        be used to augment the compilation environment.
-
-        The libraries argument is a list of flags to be passed to the
-        linker to make additional symbol definitions available for
-        linking.
-
-        The includes and include_dirs arguments are deprecated.
-        Usually, supplying include files with function declarations
-        will cause function detection to fail even in cases where the
-        symbol is available for linking.
-
-        """
-        # this can't be included at module scope because it tries to
-        # import math which might not be available at that point - maybe
-        # the necessary logic should just be inlined?
-        import tempfile
-
-        if includes is None:
-            includes = []
+        elif isinstance(other, AlphaIdentifier):
+            return True
+        elif isinstance(other, NumericIdentifier):
+            return self.value < other.value
         else:
-            warnings.warn("includes is deprecated", DeprecationWarning)
-        if include_dirs is None:
-            include_dirs = []
+            return NotImplemented
+
+
+@functools.total_ordering
+class AlphaIdentifier(object):
+    __slots__ = ['value']
+
+    def __init__(self, value):
+        self.value = value.encode('ascii')
+
+    def __repr__(self):
+        return 'AlphaIdentifier(%r)' % self.value
+
+    def __eq__(self, other):
+        if isinstance(other, AlphaIdentifier):
+            return self.value == other.value
+        return NotImplemented
+
+    def __lt__(self, other):
+        if isinstance(other, MaxIdentifier):
+            return True
+        elif isinstance(other, NumericIdentifier):
+            return False
+        elif isinstance(other, AlphaIdentifier):
+            return self.value < other.value
         else:
-            warnings.warn("include_dirs is deprecated", DeprecationWarning)
-        if libraries is None:
-            libraries = []
-        if library_dirs is None:
-            library_dirs = []
-        fd, fname = tempfile.mkstemp(".c", funcname, text=True)
-        with os.fdopen(fd, "w", encoding='utf-8') as f:
-            for incl in includes:
-                f.write(f"""#include "{incl}"\n""")
-            if not includes:
-                # Use "char func(void);" as the prototype to follow
-                # what autoconf does.  This prototype does not match
-                # any well-known function the compiler might recognize
-                # as a builtin, so this ends up as a true link test.
-                # Without a fake prototype, the test would need to
-                # know the exact argument types, and the has_function
-                # interface does not provide that level of information.
-                f.write(
-                    f"""\
-#ifdef __cplusplus
-extern "C"
-#endif
-char {funcname}(void);
-"""
+            return NotImplemented
+
+
+class Version(object):
+
+    version_re = re.compile(r'^(\d+)\.(\d+)\.(\d+)(?:-([0-9a-zA-Z.-]+))?(?:\+([0-9a-zA-Z.-]+))?$')
+    partial_version_re = re.compile(r'^(\d+)(?:\.(\d+)(?:\.(\d+))?)?(?:-([0-9a-zA-Z.-]*))?(?:\+([0-9a-zA-Z.-]*))?$')
+
+    def __init__(
+            self,
+            version_string=None,
+            major=None,
+            minor=None,
+            patch=None,
+            prerelease=None,
+            build=None,
+            partial=False):
+        if partial:
+            warnings.warn(
+                "Partial versions will be removed in 3.0; use SimpleSpec('1.x.x') instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        has_text = version_string is not None
+        has_parts = not (major is minor is patch is prerelease is build is None)
+        if not has_text ^ has_parts:
+            raise ValueError("Call either Version('1.2.3') or Version(major=1, ...).")
+
+        if has_text:
+            major, minor, patch, prerelease, build = self.parse(version_string, partial)
+        else:
+            # Convenience: allow to omit prerelease/build.
+            prerelease = tuple(prerelease or ())
+            if not partial:
+                build = tuple(build or ())
+            self._validate_kwargs(major, minor, patch, prerelease, build, partial)
+
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+        self.prerelease = prerelease
+        self.build = build
+
+        self.partial = partial
+
+        # Cached precedence keys
+        # _cmp_precedence_key is used for semver-precedence comparison
+        self._cmp_precedence_key = self._build_precedence_key(with_build=False)
+        # _sort_precedence_key is used for self.precedence_key, esp. for sorted(...)
+        self._sort_precedence_key = self._build_precedence_key(with_build=True)
+
+    @classmethod
+    def _coerce(cls, value, allow_none=False):
+        if value is None and allow_none:
+            return value
+        return int(value)
+
+    def next_major(self):
+        if self.prerelease and self.minor == self.patch == 0:
+            return Version(
+                major=self.major,
+                minor=0,
+                patch=0,
+                partial=self.partial,
+            )
+        else:
+            return Version(
+                major=self.major + 1,
+                minor=0,
+                patch=0,
+                partial=self.partial,
+            )
+
+    def next_minor(self):
+        if self.prerelease and self.patch == 0:
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=0,
+                partial=self.partial,
+            )
+        else:
+            return Version(
+                major=self.major,
+                minor=self.minor + 1,
+                patch=0,
+                partial=self.partial,
+            )
+
+    def next_patch(self):
+        if self.prerelease:
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=self.patch,
+                partial=self.partial,
+            )
+        else:
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=self.patch + 1,
+                partial=self.partial,
+            )
+
+    def truncate(self, level='patch'):
+        """Return a new Version object, truncated up to the selected level."""
+        if level == 'build':
+            return self
+        elif level == 'prerelease':
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=self.patch,
+                prerelease=self.prerelease,
+                partial=self.partial,
+            )
+        elif level == 'patch':
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=self.patch,
+                partial=self.partial,
+            )
+        elif level == 'minor':
+            return Version(
+                major=self.major,
+                minor=self.minor,
+                patch=None if self.partial else 0,
+                partial=self.partial,
+            )
+        elif level == 'major':
+            return Version(
+                major=self.major,
+                minor=None if self.partial else 0,
+                patch=None if self.partial else 0,
+                partial=self.partial,
+            )
+        else:
+            raise ValueError("Invalid truncation level `%s`." % level)
+
+    @classmethod
+    def coerce(cls, version_string, partial=False):
+        """Coerce an arbitrary version string into a semver-compatible one.
+
+        The rule is:
+        - If not enough components, fill minor/patch with zeroes; unless
+          partial=True
+        - If more than 3 dot-separated components, extra components are "build"
+          data. If some "build" data already appeared, append it to the
+          extra components
+
+        Examples:
+            >>> Version.coerce('0.1')
+            Version(0, 1, 0)
+            >>> Version.coerce('0.1.2.3')
+            Version(0, 1, 2, (), ('3',))
+            >>> Version.coerce('0.1.2.3+4')
+            Version(0, 1, 2, (), ('3', '4'))
+            >>> Version.coerce('0.1+2-3+4_5')
+            Version(0, 1, 0, (), ('2-3', '4-5'))
+        """
+        base_re = re.compile(r'^\d+(?:\.\d+(?:\.\d+)?)?')
+
+        match = base_re.match(version_string)
+        if not match:
+            raise ValueError(
+                "Version string lacks a numerical component: %r"
+                % version_string
+            )
+
+        version = version_string[:match.end()]
+        if not partial:
+            # We need a not-partial version.
+            while version.count('.') < 2:
+                version += '.0'
+
+        # Strip leading zeros in components
+        # Version is of the form nn, nn.pp or nn.pp.qq
+        version = '.'.join(
+            # If the part was '0', we end up with an empty string.
+            part.lstrip('0') or '0'
+            for part in version.split('.')
+        )
+
+        if match.end() == len(version_string):
+            return Version(version, partial=partial)
+
+        rest = version_string[match.end():]
+
+        # Cleanup the 'rest'
+        rest = re.sub(r'[^a-zA-Z0-9+.-]', '-', rest)
+
+        if rest[0] == '+':
+            # A 'build' component
+            prerelease = ''
+            build = rest[1:]
+        elif rest[0] == '.':
+            # An extra version component, probably 'build'
+            prerelease = ''
+            build = rest[1:]
+        elif rest[0] == '-':
+            rest = rest[1:]
+            if '+' in rest:
+                prerelease, build = rest.split('+', 1)
+            else:
+                prerelease, build = rest, ''
+        elif '+' in rest:
+            prerelease, build = rest.split('+', 1)
+        else:
+            prerelease, build = rest, ''
+
+        build = build.replace('+', '.')
+
+        if prerelease:
+            version = '%s-%s' % (version, prerelease)
+        if build:
+            version = '%s+%s' % (version, build)
+
+        return cls(version, partial=partial)
+
+    @classmethod
+    def parse(cls, version_string, partial=False, coerce=False):
+        """Parse a version string into a tuple of components:
+           (major, minor, patch, prerelease, build).
+
+        Args:
+            version_string (str), the version string to parse
+            partial (bool), whether to accept incomplete input
+            coerce (bool), whether to try to map the passed in string into a
+                valid Version.
+        """
+        if not version_string:
+            raise ValueError('Invalid empty version string: %r' % version_string)
+
+        if partial:
+            version_re = cls.partial_version_re
+        else:
+            version_re = cls.version_re
+
+        match = version_re.match(version_string)
+        if not match:
+            raise ValueError('Invalid version string: %r' % version_string)
+
+        major, minor, patch, prerelease, build = match.groups()
+
+        if _has_leading_zero(major):
+            raise ValueError("Invalid leading zero in major: %r" % version_string)
+        if _has_leading_zero(minor):
+            raise ValueError("Invalid leading zero in minor: %r" % version_string)
+        if _has_leading_zero(patch):
+            raise ValueError("Invalid leading zero in patch: %r" % version_string)
+
+        major = int(major)
+        minor = cls._coerce(minor, partial)
+        patch = cls._coerce(patch, partial)
+
+        if prerelease is None:
+            if partial and (build is None):
+                # No build info, strip here
+                return (major, minor, patch, None, None)
+            else:
+                prerelease = ()
+        elif prerelease == '':
+            prerelease = ()
+        else:
+            prerelease = tuple(prerelease.split('.'))
+            cls._validate_identifiers(prerelease, allow_leading_zeroes=False)
+
+        if build is None:
+            if partial:
+                build = None
+            else:
+                build = ()
+        elif build == '':
+            build = ()
+        else:
+            build = tuple(build.split('.'))
+            cls._validate_identifiers(build, allow_leading_zeroes=True)
+
+        return (major, minor, patch, prerelease, build)
+
+    @classmethod
+    def _validate_identifiers(cls, identifiers, allow_leading_zeroes=False):
+        for item in identifiers:
+            if not item:
+                raise ValueError(
+                    "Invalid empty identifier %r in %r"
+                    % (item, '.'.join(identifiers))
                 )
-            f.write(
-                f"""\
-int main (int argc, char **argv) {{
-    {funcname}();
-    return 0;
-}}
-"""
-            )
 
-        try:
-            objects = self.compile([fname], include_dirs=include_dirs)
-        except CompileError:
-            return False
-        finally:
-            os.remove(fname)
+            if item[0] == '0' and item.isdigit() and item != '0' and not allow_leading_zeroes:
+                raise ValueError("Invalid leading zero in identifier %r" % item)
 
-        try:
-            self.link_executable(
-                objects, "a.out", libraries=libraries, library_dirs=library_dirs
-            )
-        except (LinkError, TypeError):
-            return False
-        else:
-            os.remove(
-                self.executable_filename("a.out", output_dir=self.output_dir or '')
-            )
-        finally:
-            for fn in objects:
-                os.remove(fn)
-        return True
+    @classmethod
+    def _validate_kwargs(cls, major, minor, patch, prerelease, build, partial):
+        if (
+                major != int(major)
+                or minor != cls._coerce(minor, partial)
+                or patch != cls._coerce(patch, partial)
+                or prerelease is None and not partial
+                or build is None and not partial
+        ):
+            raise ValueError(
+                "Invalid kwargs to Version(major=%r, minor=%r, patch=%r, "
+                "prerelease=%r, build=%r, partial=%r" % (
+                    major, minor, patch, prerelease, build, partial
+                ))
+        if prerelease is not None:
+            cls._validate_identifiers(prerelease, allow_leading_zeroes=False)
+        if build is not None:
+            cls._validate_identifiers(build, allow_leading_zeroes=True)
 
-    def find_library_file(
-        self, dirs: Iterable[str], lib: str, debug: bool = False
-    ) -> str | None:
-        """Search the specified list of directories for a static or shared
-        library file 'lib' and return the full path to that file.  If
-        'debug' true, look for a debugging version (if that makes sense on
-        the current platform).  Return None if 'lib' wasn't found in any of
-        the specified directories.
+    def __iter__(self):
+        return iter((self.major, self.minor, self.patch, self.prerelease, self.build))
+
+    def __str__(self):
+        version = '%d' % self.major
+        if self.minor is not None:
+            version = '%s.%d' % (version, self.minor)
+        if self.patch is not None:
+            version = '%s.%d' % (version, self.patch)
+
+        if self.prerelease or (self.partial and self.prerelease == () and self.build is None):
+            version = '%s-%s' % (version, '.'.join(self.prerelease))
+        if self.build or (self.partial and self.build == ()):
+            version = '%s+%s' % (version, '.'.join(self.build))
+        return version
+
+    def __repr__(self):
+        return '%s(%r%s)' % (
+            self.__class__.__name__,
+            str(self),
+            ', partial=True' if self.partial else '',
+        )
+
+    def __hash__(self):
+        # We don't include 'partial', since this is strictly equivalent to having
+        # at least a field being `None`.
+        return hash((self.major, self.minor, self.patch, self.prerelease, self.build))
+
+    def _build_precedence_key(self, with_build=False):
+        """Build a precedence key.
+
+        The "build" component should only be used when sorting an iterable
+        of versions.
         """
-        raise NotImplementedError
+        if self.prerelease:
+            prerelease_key = tuple(
+                NumericIdentifier(part) if part.isdigit() else AlphaIdentifier(part)
+                for part in self.prerelease
+            )
+        else:
+            prerelease_key = (
+                MaxIdentifier(),
+            )
 
-    # -- Filename generation methods -----------------------------------
+        if not with_build:
+            return (
+                self.major,
+                self.minor,
+                self.patch,
+                prerelease_key,
+            )
 
-    # The default implementation of the filename generating methods are
-    # prejudiced towards the Unix/DOS/Windows view of the world:
-    #   * object files are named by replacing the source file extension
-    #     (eg. .c/.cpp -> .o/.obj)
-    #   * library files (shared or static) are named by plugging the
-    #     library name and extension into a format string, eg.
-    #     "lib%s.%s" % (lib_name, ".a") for Unix static libraries
-    #   * executables are named by appending an extension (possibly
-    #     empty) to the program name: eg. progname + ".exe" for
-    #     Windows
-    #
-    # To reduce redundant code, these methods expect to find
-    # several attributes in the current object (presumably defined
-    # as class attributes):
-    #   * src_extensions -
-    #     list of C/C++ source file extensions, eg. ['.c', '.cpp']
-    #   * obj_extension -
-    #     object file extension, eg. '.o' or '.obj'
-    #   * static_lib_extension -
-    #     extension for static library files, eg. '.a' or '.lib'
-    #   * shared_lib_extension -
-    #     extension for shared library/object files, eg. '.so', '.dll'
-    #   * static_lib_format -
-    #     format string for generating static library filenames,
-    #     eg. 'lib%s.%s' or '%s.%s'
-    #   * shared_lib_format
-    #     format string for generating shared library filenames
-    #     (probably same as static_lib_format, since the extension
-    #     is one of the intended parameters to the format string)
-    #   * exe_extension -
-    #     extension for executable files, eg. '' or '.exe'
+        build_key = tuple(
+            NumericIdentifier(part) if part.isdigit() else AlphaIdentifier(part)
+            for part in self.build or ()
+        )
 
-    def object_filenames(
-        self,
-        source_filenames: Iterable[str | os.PathLike[str]],
-        strip_dir: bool = False,
-        output_dir: str | os.PathLike[str] | None = '',
-    ) -> list[str]:
-        if output_dir is None:
-            output_dir = ''
-        return list(
-            self._make_out_path(output_dir, strip_dir, src_name)
-            for src_name in source_filenames
+        return (
+            self.major,
+            self.minor,
+            self.patch,
+            prerelease_key,
+            build_key,
         )
 
     @property
-    def out_extensions(self):
-        return dict.fromkeys(self.src_extensions, self.obj_extension)
+    def precedence_key(self):
+        return self._sort_precedence_key
 
-    def _make_out_path(self, output_dir, strip_dir, src_name):
-        return self._make_out_path_exts(
-            output_dir, strip_dir, src_name, self.out_extensions
+    def __cmp__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        if self < other:
+            return -1
+        elif self > other:
+            return 1
+        elif self == other:
+            return 0
+        else:
+            return NotImplemented
+
+    def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return (
+            self.major == other.major
+            and self.minor == other.minor
+            and self.patch == other.patch
+            and (self.prerelease or ()) == (other.prerelease or ())
+            and (self.build or ()) == (other.build or ())
         )
+
+    def __ne__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return tuple(self) != tuple(other)
+
+    def __lt__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self._cmp_precedence_key < other._cmp_precedence_key
+
+    def __le__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self._cmp_precedence_key <= other._cmp_precedence_key
+
+    def __gt__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self._cmp_precedence_key > other._cmp_precedence_key
+
+    def __ge__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self._cmp_precedence_key >= other._cmp_precedence_key
+
+
+class SpecItem(object):
+    """A requirement specification."""
+
+    KIND_ANY = '*'
+    KIND_LT = '<'
+    KIND_LTE = '<='
+    KIND_EQUAL = '=='
+    KIND_SHORTEQ = '='
+    KIND_EMPTY = ''
+    KIND_GTE = '>='
+    KIND_GT = '>'
+    KIND_NEQ = '!='
+    KIND_CARET = '^'
+    KIND_TILDE = '~'
+    KIND_COMPATIBLE = '~='
+
+    # Map a kind alias to its full version
+    KIND_ALIASES = {
+        KIND_SHORTEQ: KIND_EQUAL,
+        KIND_EMPTY: KIND_EQUAL,
+    }
+
+    re_spec = re.compile(r'^(<|<=||=|==|>=|>|!=|\^|~|~=)(\d.*)$')
+
+    def __init__(self, requirement_string, _warn=True):
+        if _warn:
+            warnings.warn(
+                "The `SpecItem` class will be removed in 3.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        kind, spec = self.parse(requirement_string)
+        self.kind = kind
+        self.spec = spec
+        self._clause = Spec(requirement_string).clause
 
     @classmethod
-    def _make_out_path_exts(cls, output_dir, strip_dir, src_name, extensions):
-        r"""
-        >>> exts = {'.c': '.o'}
-        >>> Compiler._make_out_path_exts('.', False, '/foo/bar.c', exts).replace('\\', '/')
-        './foo/bar.o'
-        >>> Compiler._make_out_path_exts('.', True, '/foo/bar.c', exts).replace('\\', '/')
-        './bar.o'
-        """
-        src = pathlib.PurePath(src_name)
-        # Ensure base is relative to honor output_dir (python/cpython#37775).
-        base = cls._make_relative(src)
-        try:
-            new_ext = extensions[src.suffix]
-        except LookupError:
-            raise UnknownFileType(f"unknown file type '{src.suffix}' (from '{src}')")
-        if strip_dir:
-            base = pathlib.PurePath(base.name)
-        return os.path.join(output_dir, base.with_suffix(new_ext))
+    def parse(cls, requirement_string):
+        if not requirement_string:
+            raise ValueError("Invalid empty requirement specification: %r" % requirement_string)
 
-    @staticmethod
-    def _make_relative(base: pathlib.Path):
-        return base.relative_to(base.anchor)
+        # Special case: the 'any' version spec.
+        if requirement_string == '*':
+            return (cls.KIND_ANY, '')
 
-    @overload
-    def shared_object_filename(
-        self,
-        basename: str,
-        strip_dir: Literal[False] = False,
-        output_dir: str | os.PathLike[str] = "",
-    ) -> str: ...
-    @overload
-    def shared_object_filename(
-        self,
-        basename: str | os.PathLike[str],
-        strip_dir: Literal[True],
-        output_dir: str | os.PathLike[str] = "",
-    ) -> str: ...
-    def shared_object_filename(
-        self,
-        basename: str | os.PathLike[str],
-        strip_dir: bool = False,
-        output_dir: str | os.PathLike[str] = '',
-    ) -> str:
-        assert output_dir is not None
-        if strip_dir:
-            basename = os.path.basename(basename)
-        return os.path.join(output_dir, basename + self.shared_lib_extension)
+        match = cls.re_spec.match(requirement_string)
+        if not match:
+            raise ValueError("Invalid requirement specification: %r" % requirement_string)
 
-    @overload
-    def executable_filename(
-        self,
-        basename: str,
-        strip_dir: Literal[False] = False,
-        output_dir: str | os.PathLike[str] = "",
-    ) -> str: ...
-    @overload
-    def executable_filename(
-        self,
-        basename: str | os.PathLike[str],
-        strip_dir: Literal[True],
-        output_dir: str | os.PathLike[str] = "",
-    ) -> str: ...
-    def executable_filename(
-        self,
-        basename: str | os.PathLike[str],
-        strip_dir: bool = False,
-        output_dir: str | os.PathLike[str] = '',
-    ) -> str:
-        assert output_dir is not None
-        if strip_dir:
-            basename = os.path.basename(basename)
-        return os.path.join(output_dir, basename + (self.exe_extension or ''))
+        kind, version = match.groups()
+        if kind in cls.KIND_ALIASES:
+            kind = cls.KIND_ALIASES[kind]
 
-    def library_filename(
-        self,
-        libname: str,
-        lib_type: str = "static",
-        strip_dir: bool = False,
-        output_dir: str | os.PathLike[str] = "",  # or 'shared'
-    ):
-        assert output_dir is not None
-        expected = '"static", "shared", "dylib", "xcode_stub"'
-        if lib_type not in eval(expected):
-            raise ValueError(f"'lib_type' must be {expected}")
-        fmt = getattr(self, lib_type + "_lib_format")
-        ext = getattr(self, lib_type + "_lib_extension")
-
-        dir, base = os.path.split(libname)
-        filename = fmt % (base, ext)
-        if strip_dir:
-            dir = ''
-
-        return os.path.join(output_dir, dir, filename)
-
-    # -- Utility methods -----------------------------------------------
-
-    def announce(self, msg: object, level: int = 1) -> None:
-        log.debug(msg)
-
-    def debug_print(self, msg: object) -> None:
-        from distutils.debug import DEBUG
-
-        if DEBUG:
-            print(msg)
-
-    def warn(self, msg: object) -> None:
-        sys.stderr.write(f"warning: {msg}\n")
-
-    def execute(
-        self,
-        func: Callable[[Unpack[_Ts]], object],
-        args: tuple[Unpack[_Ts]],
-        msg: object = None,
-        level: int = 1,
-    ) -> None:
-        execute(func, args, msg)
-
-    def spawn(
-        self, cmd: MutableSequence[bytes | str | os.PathLike[str]], **kwargs
-    ) -> None:
-        spawn(cmd, **kwargs)
-
-    @overload
-    def move_file(
-        self, src: str | os.PathLike[str], dst: _StrPathT
-    ) -> _StrPathT | str: ...
-    @overload
-    def move_file(
-        self, src: bytes | os.PathLike[bytes], dst: _BytesPathT
-    ) -> _BytesPathT | bytes: ...
-    def move_file(
-        self,
-        src: str | os.PathLike[str] | bytes | os.PathLike[bytes],
-        dst: str | os.PathLike[str] | bytes | os.PathLike[bytes],
-    ) -> str | os.PathLike[str] | bytes | os.PathLike[bytes]:
-        return move_file(src, dst)
-
-    def mkpath(self, name, mode=0o777):
-        mkpath(name, mode)
-
-
-# Map a sys.platform/os.name ('posix', 'nt') to the default compiler
-# type for that platform. Keys are interpreted as re match
-# patterns. Order is important; platform mappings are preferred over
-# OS names.
-_default_compilers = (
-    # Platform string mappings
-    # on a cygwin built python we can use gcc like an ordinary UNIXish
-    # compiler
-    ('cygwin.*', 'unix'),
-    ('zos', 'zos'),
-    # OS name mappings
-    ('posix', 'unix'),
-    ('nt', 'msvc'),
-)
-
-
-def get_default_compiler(osname: str | None = None, platform: str | None = None) -> str:
-    """Determine the default compiler to use for the given platform.
-
-    osname should be one of the standard Python OS names (i.e. the
-    ones returned by os.name) and platform the common value
-    returned by sys.platform for the platform in question.
-
-    The default values are os.name and sys.platform in case the
-    parameters are not given.
-    """
-    if osname is None:
-        osname = os.name
-    if platform is None:
-        platform = sys.platform
-    # Mingw is a special case where sys.platform is 'win32' but we
-    # want to use the 'mingw32' compiler, so check it first
-    if is_mingw():
-        return 'mingw32'
-    for pattern, compiler in _default_compilers:
-        if (
-            re.match(pattern, platform) is not None
-            or re.match(pattern, osname) is not None
-        ):
-            return compiler
-    # Default to Unix compiler
-    return 'unix'
-
-
-# Map compiler types to (module_name, class_name) pairs -- ie. where to
-# find the code that implements an interface to this compiler.  (The module
-# is assumed to be in the 'distutils' package.)
-compiler_class = {
-    'unix': ('unixccompiler', 'UnixCCompiler', "standard UNIX-style compiler"),
-    'msvc': ('_msvccompiler', 'MSVCCompiler', "Microsoft Visual C++"),
-    'cygwin': (
-        'cygwinccompiler',
-        'CygwinCCompiler',
-        "Cygwin port of GNU C Compiler for Win32",
-    ),
-    'mingw32': (
-        'cygwinccompiler',
-        'Mingw32CCompiler',
-        "Mingw32 port of GNU C Compiler for Win32",
-    ),
-    'bcpp': ('bcppcompiler', 'BCPPCompiler', "Borland C++ Compiler"),
-    'zos': ('zosccompiler', 'zOSCCompiler', 'IBM XL C/C++ Compilers'),
-}
-
-
-def show_compilers() -> None:
-    """Print list of available compilers (used by the "--help-compiler"
-    options to "build", "build_ext", "build_clib").
-    """
-    # XXX this "knows" that the compiler option it's describing is
-    # "--compiler", which just happens to be the case for the three
-    # commands that use it.
-    from distutils.fancy_getopt import FancyGetopt
-
-    compilers = sorted(
-        ("compiler=" + compiler, None, compiler_class[compiler][2])
-        for compiler in compiler_class.keys()
-    )
-    pretty_printer = FancyGetopt(compilers)
-    pretty_printer.print_help("List of available compilers:")
-
-
-def new_compiler(
-    plat: str | None = None,
-    compiler: str | None = None,
-    verbose: bool = False,
-    force: bool = False,
-) -> Compiler:
-    """Generate an instance of some CCompiler subclass for the supplied
-    platform/compiler combination.  'plat' defaults to 'os.name'
-    (eg. 'posix', 'nt'), and 'compiler' defaults to the default compiler
-    for that platform.  Currently only 'posix' and 'nt' are supported, and
-    the default compilers are "traditional Unix interface" (UnixCCompiler
-    class) and Visual C++ (MSVCCompiler class).  Note that it's perfectly
-    possible to ask for a Unix compiler object under Windows, and a
-    Microsoft compiler object under Unix -- if you supply a value for
-    'compiler', 'plat' is ignored.
-    """
-    if plat is None:
-        plat = os.name
-
-    try:
-        if compiler is None:
-            compiler = get_default_compiler(plat)
-
-        (module_name, class_name, long_description) = compiler_class[compiler]
-    except KeyError:
-        msg = f"don't know how to compile C/C++ code on platform '{plat}'"
-        if compiler is not None:
-            msg = msg + f" with '{compiler}' compiler"
-        raise DistutilsPlatformError(msg)
-
-    try:
-        module_name = "distutils." + module_name
-        __import__(module_name)
-        module = sys.modules[module_name]
-        klass = vars(module)[class_name]
-    except ImportError:
-        raise DistutilsModuleError(
-            f"can't compile C/C++ code: unable to load module '{module_name}'"
-        )
-    except KeyError:
-        raise DistutilsModuleError(
-            f"can't compile C/C++ code: unable to find class '{class_name}' "
-            f"in module '{module_name}'"
-        )
-
-    # XXX The None is necessary to preserve backwards compatibility
-    # with classes that expect verbose to be the first positional
-    # argument.
-    return klass(None, force=force)
-
-
-def gen_preprocess_options(
-    macros: Iterable[_Macro], include_dirs: Iterable[str]
-) -> list[str]:
-    """Generate C pre-processor options (-D, -U, -I) as used by at least
-    two types of compilers: the typical Unix compiler and Visual C++.
-    'macros' is the usual thing, a list of 1- or 2-tuples, where (name,)
-    means undefine (-U) macro 'name', and (name,value) means define (-D)
-    macro 'name' to 'value'.  'include_dirs' is just a list of directory
-    names to be added to the header file search path (-I).  Returns a list
-    of command-line options suitable for either Unix compilers or Visual
-    C++.
-    """
-    # XXX it would be nice (mainly aesthetic, and so we don't generate
-    # stupid-looking command lines) to go over 'macros' and eliminate
-    # redundant definitions/undefinitions (ie. ensure that only the
-    # latest mention of a particular macro winds up on the command
-    # line).  I don't think it's essential, though, since most (all?)
-    # Unix C compilers only pay attention to the latest -D or -U
-    # mention of a macro on their command line.  Similar situation for
-    # 'include_dirs'.  I'm punting on both for now.  Anyways, weeding out
-    # redundancies like this should probably be the province of
-    # CCompiler, since the data structures used are inherited from it
-    # and therefore common to all CCompiler classes.
-    pp_opts = []
-    for macro in macros:
-        if not (isinstance(macro, tuple) and 1 <= len(macro) <= 2):
-            raise TypeError(
-                f"bad macro definition '{macro}': "
-                "each element of 'macros' list must be a 1- or 2-tuple"
+        spec = Version(version, partial=True)
+        if spec.build is not None and kind not in (cls.KIND_EQUAL, cls.KIND_NEQ):
+            raise ValueError(
+                "Invalid requirement specification %r: build numbers have no ordering."
+                % requirement_string
             )
+        return (kind, spec)
 
-        if len(macro) == 1:  # undefine this macro
-            pp_opts.append(f"-U{macro[0]}")
-        elif len(macro) == 2:
-            if macro[1] is None:  # define with no explicit value
-                pp_opts.append(f"-D{macro[0]}")
-            else:
-                # XXX *don't* need to be clever about quoting the
-                # macro value here, because we're going to avoid the
-                # shell at all costs when we spawn the command!
-                pp_opts.append("-D{}={}".format(*macro))
+    @classmethod
+    def from_matcher(cls, matcher):
+        if matcher == Always():
+            return cls('*', _warn=False)
+        elif matcher == Never():
+            return cls('<0.0.0-', _warn=False)
+        elif isinstance(matcher, Range):
+            return cls('%s%s' % (matcher.operator, matcher.target), _warn=False)
 
-    pp_opts.extend(f"-I{dir}" for dir in include_dirs)
-    return pp_opts
+    def match(self, version):
+        return self._clause.match(version)
+
+    def __str__(self):
+        return '%s%s' % (self.kind, self.spec)
+
+    def __repr__(self):
+        return '<SpecItem: %s %r>' % (self.kind, self.spec)
+
+    def __eq__(self, other):
+        if not isinstance(other, SpecItem):
+            return NotImplemented
+        return self.kind == other.kind and self.spec == other.spec
+
+    def __hash__(self):
+        return hash((self.kind, self.spec))
 
 
-def gen_lib_options(
-    compiler: Compiler,
-    library_dirs: Iterable[str],
-    runtime_library_dirs: Iterable[str],
-    libraries: Iterable[str],
-) -> list[str]:
-    """Generate linker options for searching library directories and
-    linking with specific libraries.  'libraries' and 'library_dirs' are,
-    respectively, lists of library names (not filenames!) and search
-    directories.  Returns a list of command-line options suitable for use
-    with some compiler (depending on the two format strings passed in).
+def compare(v1, v2):
+    return Version(v1).__cmp__(Version(v2))
+
+
+def match(spec, version):
+    return Spec(spec).match(Version(version))
+
+
+def validate(version_string):
+    """Validates a version string againt the SemVer specification."""
+    try:
+        Version.parse(version_string)
+        return True
+    except ValueError:
+        return False
+
+
+DEFAULT_SYNTAX = 'simple'
+
+
+class BaseSpec(object):
+    """A specification of compatible versions.
+
+    Usage:
+    >>> Spec('>=1.0.0', syntax='npm')
+
+    A version matches a specification if it matches any
+    of the clauses of that specification.
+
+    Internally, a Spec is AnyOf(
+        AllOf(Matcher, Matcher, Matcher),
+        AllOf(...),
+    )
     """
-    lib_opts = [compiler.library_dir_option(dir) for dir in library_dirs]
+    SYNTAXES = {}
 
-    for dir in runtime_library_dirs:
-        lib_opts.extend(always_iterable(compiler.runtime_library_dir_option(dir)))
+    @classmethod
+    def register_syntax(cls, subclass):
+        syntax = subclass.SYNTAX
+        if syntax is None:
+            raise ValueError("A Spec needs its SYNTAX field to be set.")
+        elif syntax in cls.SYNTAXES:
+            raise ValueError(
+                "Duplicate syntax for %s: %r, %r"
+                % (syntax, cls.SYNTAXES[syntax], subclass)
+            )
+        cls.SYNTAXES[syntax] = subclass
+        return subclass
 
-    # XXX it's important that we *not* remove redundant library mentions!
-    # sometimes you really do have to say "-lfoo -lbar -lfoo" in order to
-    # resolve all symbols.  I just hope we never have to say "-lfoo obj.o
-    # -lbar" to get things to work -- that's certainly a possibility, but a
-    # pretty nasty way to arrange your C code.
+    def __init__(self, expression):
+        super(BaseSpec, self).__init__()
+        self.expression = expression
+        self.clause = self._parse_to_clause(expression)
 
-    for lib in libraries:
-        (lib_dir, lib_name) = os.path.split(lib)
-        if lib_dir:
-            lib_file = compiler.find_library_file([lib_dir], lib_name)
-            if lib_file:
-                lib_opts.append(lib_file)
+    @classmethod
+    def parse(cls, expression, syntax=DEFAULT_SYNTAX):
+        """Convert a syntax-specific expression into a BaseSpec instance."""
+        return cls.SYNTAXES[syntax](expression)
+
+    @classmethod
+    def _parse_to_clause(cls, expression):
+        """Converts an expression to a clause."""
+        raise NotImplementedError()
+
+    def filter(self, versions):
+        """Filter an iterable of versions satisfying the Spec."""
+        for version in versions:
+            if self.match(version):
+                yield version
+
+    def match(self, version):
+        """Check whether a Version satisfies the Spec."""
+        return self.clause.match(version)
+
+    def select(self, versions):
+        """Select the best compatible version among an iterable of options."""
+        options = list(self.filter(versions))
+        if options:
+            return max(options)
+        return None
+
+    def __contains__(self, version):
+        """Whether `version in self`."""
+        if isinstance(version, Version):
+            return self.match(version)
+        return False
+
+    def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+
+        return self.clause == other.clause
+
+    def __hash__(self):
+        return hash(self.clause)
+
+    def __str__(self):
+        return self.expression
+
+    def __repr__(self):
+        return '<%s: %r>' % (self.__class__.__name__, self.expression)
+
+
+class Clause(object):
+    __slots__ = []
+
+    def match(self, version):
+        raise NotImplementedError()
+
+    def __and__(self, other):
+        raise NotImplementedError()
+
+    def __or__(self, other):
+        raise NotImplementedError()
+
+    def __eq__(self, other):
+        raise NotImplementedError()
+
+    def prettyprint(self, indent='\t'):
+        """Pretty-print the clause.
+        """
+        return '\n'.join(self._pretty()).replace('\t', indent)
+
+    def _pretty(self):
+        """Actual pretty-printing logic.
+
+        Yields:
+            A list of string. Indentation is performed with \t.
+        """
+        yield repr(self)
+
+    def __ne__(self, other):
+        return not self == other
+
+    def simplify(self):
+        return self
+
+
+class AnyOf(Clause):
+    __slots__ = ['clauses']
+
+    def __init__(self, *clauses):
+        super(AnyOf, self).__init__()
+        self.clauses = frozenset(clauses)
+
+    def match(self, version):
+        return any(c.match(version) for c in self.clauses)
+
+    def simplify(self):
+        subclauses = set()
+        for clause in self.clauses:
+            simplified = clause.simplify()
+            if isinstance(simplified, AnyOf):
+                subclauses |= simplified.clauses
+            elif simplified == Never():
+                continue
             else:
-                compiler.warn(
-                    f"no library file corresponding to '{lib}' found (skipping)"
-                )
+                subclauses.add(simplified)
+        if len(subclauses) == 1:
+            return subclauses.pop()
+        return AnyOf(*subclauses)
+
+    def __hash__(self):
+        return hash((AnyOf, self.clauses))
+
+    def __iter__(self):
+        return iter(self.clauses)
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.clauses == other.clauses
+
+    def __and__(self, other):
+        if isinstance(other, AllOf):
+            return other & self
+        elif isinstance(other, Matcher) or isinstance(other, AnyOf):
+            return AllOf(self, other)
         else:
-            lib_opts.append(compiler.library_option(lib))
-    return lib_opts
+            return NotImplemented
+
+    def __or__(self, other):
+        if isinstance(other, AnyOf):
+            clauses = list(self.clauses | other.clauses)
+        elif isinstance(other, Matcher) or isinstance(other, AllOf):
+            clauses = list(self.clauses | set([other]))
+        else:
+            return NotImplemented
+        return AnyOf(*clauses)
+
+    def __repr__(self):
+        return 'AnyOf(%s)' % ', '.join(sorted(repr(c) for c in self.clauses))
+
+    def _pretty(self):
+        yield 'AnyOF('
+        for clause in self.clauses:
+            lines = list(clause._pretty())
+            for line in lines[:-1]:
+                yield '\t' + line
+            yield '\t' + lines[-1] + ','
+        yield ')'
+
+
+class AllOf(Clause):
+    __slots__ = ['clauses']
+
+    def __init__(self, *clauses):
+        super(AllOf, self).__init__()
+        self.clauses = frozenset(clauses)
+
+    def match(self, version):
+        return all(clause.match(version) for clause in self.clauses)
+
+    def simplify(self):
+        subclauses = set()
+        for clause in self.clauses:
+            simplified = clause.simplify()
+            if isinstance(simplified, AllOf):
+                subclauses |= simplified.clauses
+            elif simplified == Always():
+                continue
+            else:
+                subclauses.add(simplified)
+        if len(subclauses) == 1:
+            return subclauses.pop()
+        return AllOf(*subclauses)
+
+    def __hash__(self):
+        return hash((AllOf, self.clauses))
+
+    def __iter__(self):
+        return iter(self.clauses)
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.clauses == other.clauses
+
+    def __and__(self, other):
+        if isinstance(other, Matcher) or isinstance(other, AnyOf):
+            clauses = list(self.clauses | set([other]))
+        elif isinstance(other, AllOf):
+            clauses = list(self.clauses | other.clauses)
+        else:
+            return NotImplemented
+        return AllOf(*clauses)
+
+    def __or__(self, other):
+        if isinstance(other, AnyOf):
+            return other | self
+        elif isinstance(other, Matcher):
+            return AnyOf(self, AllOf(other))
+        elif isinstance(other, AllOf):
+            return AnyOf(self, other)
+        else:
+            return NotImplemented
+
+    def __repr__(self):
+        return 'AllOf(%s)' % ', '.join(sorted(repr(c) for c in self.clauses))
+
+    def _pretty(self):
+        yield 'AllOF('
+        for clause in self.clauses:
+            lines = list(clause._pretty())
+            for line in lines[:-1]:
+                yield '\t' + line
+            yield '\t' + lines[-1] + ','
+        yield ')'
+
+
+class Matcher(Clause):
+    __slots__ = []
+
+    def __and__(self, other):
+        if isinstance(other, AllOf):
+            return other & self
+        elif isinstance(other, Matcher) or isinstance(other, AnyOf):
+            return AllOf(self, other)
+        else:
+            return NotImplemented
+
+    def __or__(self, other):
+        if isinstance(other, AnyOf):
+            return other | self
+        elif isinstance(other, Matcher) or isinstance(other, AllOf):
+            return AnyOf(self, other)
+        else:
+            return NotImplemented
+
+
+class Never(Matcher):
+    __slots__ = []
+
+    def match(self, version):
+        return False
+
+    def __hash__(self):
+        return hash((Never,))
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__)
+
+    def __and__(self, other):
+        return self
+
+    def __or__(self, other):
+        return other
+
+    def __repr__(self):
+        return 'Never()'
+
+
+class Always(Matcher):
+    __slots__ = []
+
+    def match(self, version):
+        return True
+
+    def __hash__(self):
+        return hash((Always,))
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__)
+
+    def __and__(self, other):
+        return other
+
+    def __or__(self, other):
+        return self
+
+    def __repr__(self):
+        return 'Always()'
+
+
+class Range(Matcher):
+    OP_EQ = '=='
+    OP_GT = '>'
+    OP_GTE = '>='
+    OP_LT = '<'
+    OP_LTE = '<='
+    OP_NEQ = '!='
+
+    # <1.2.3 matches 1.2.3-a1
+    PRERELEASE_ALWAYS = 'always'
+    # <1.2.3 does not match 1.2.3-a1
+    PRERELEASE_NATURAL = 'natural'
+    # 1.2.3-a1 is only considered if target == 1.2.3-xxx
+    PRERELEASE_SAMEPATCH = 'same-patch'
+
+    # 1.2.3 matches 1.2.3+*
+    BUILD_IMPLICIT = 'implicit'
+    # 1.2.3 matches only 1.2.3, not 1.2.3+4
+    BUILD_STRICT = 'strict'
+
+    __slots__ = ['operator', 'target', 'prerelease_policy', 'build_policy']
+
+    def __init__(self, operator, target, prerelease_policy=PRERELEASE_NATURAL, build_policy=BUILD_IMPLICIT):
+        super(Range, self).__init__()
+        if target.build and operator not in (self.OP_EQ, self.OP_NEQ):
+            raise ValueError(
+                "Invalid range %s%s: build numbers have no ordering."
+                % (operator, target))
+        self.operator = operator
+        self.target = target
+        self.prerelease_policy = prerelease_policy
+        self.build_policy = self.BUILD_STRICT if target.build else build_policy
+
+    def match(self, version):
+        if self.build_policy != self.BUILD_STRICT:
+            version = version.truncate('prerelease')
+
+        if version.prerelease:
+            same_patch = self.target.truncate() == version.truncate()
+
+            if self.prerelease_policy == self.PRERELEASE_SAMEPATCH and not same_patch:
+                return False
+
+        if self.operator == self.OP_EQ:
+            if self.build_policy == self.BUILD_STRICT:
+                return (
+                    self.target.truncate('prerelease') == version.truncate('prerelease')
+                    and version.build == self.target.build
+                )
+            return version == self.target
+        elif self.operator == self.OP_GT:
+            return version > self.target
+        elif self.operator == self.OP_GTE:
+            return version >= self.target
+        elif self.operator == self.OP_LT:
+            if (
+                version.prerelease
+                and self.prerelease_policy == self.PRERELEASE_NATURAL
+                and version.truncate() == self.target.truncate()
+                and not self.target.prerelease
+            ):
+                return False
+            return version < self.target
+        elif self.operator == self.OP_LTE:
+            return version <= self.target
+        else:
+            assert self.operator == self.OP_NEQ
+            if self.build_policy == self.BUILD_STRICT:
+                return not (
+                    self.target.truncate('prerelease') == version.truncate('prerelease')
+                    and version.build == self.target.build
+                )
+
+            if (
+                version.prerelease
+                and self.prerelease_policy == self.PRERELEASE_NATURAL
+                and version.truncate() == self.target.truncate()
+                and not self.target.prerelease
+            ):
+                return False
+            return version != self.target
+
+    def __hash__(self):
+        return hash((Range, self.operator, self.target, self.prerelease_policy))
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, self.__class__)
+            and self.operator == other.operator
+            and self.target == other.target
+            and self.prerelease_policy == other.prerelease_policy
+        )
+
+    def __str__(self):
+        return '%s%s' % (self.operator, self.target)
+
+    def __repr__(self):
+        policy_part = (
+            '' if self.prerelease_policy == self.PRERELEASE_NATURAL
+            else ', prerelease_policy=%r' % self.prerelease_policy
+        ) + (
+            '' if self.build_policy == self.BUILD_IMPLICIT
+            else ', build_policy=%r' % self.build_policy
+        )
+        return 'Range(%r, %r%s)' % (
+            self.operator,
+            self.target,
+            policy_part,
+        )
+
+
+@BaseSpec.register_syntax
+class SimpleSpec(BaseSpec):
+
+    SYNTAX = 'simple'
+
+    @classmethod
+    def _parse_to_clause(cls, expression):
+        return cls.Parser.parse(expression)
+
+    class Parser:
+        NUMBER = r'\*|0|[1-9][0-9]*'
+        NAIVE_SPEC = re.compile(r"""^
+            (?P<op><|<=||=|==|>=|>|!=|\^|~|~=)
+            (?P<major>{nb})(?:\.(?P<minor>{nb})(?:\.(?P<patch>{nb}))?)?
+            (?:-(?P<prerel>[a-z0-9A-Z.-]*))?
+            (?:\+(?P<build>[a-z0-9A-Z.-]*))?
+            $
+            """.format(nb=NUMBER),
+            re.VERBOSE,
+        )
+
+        @classmethod
+        def parse(cls, expression):
+            blocks = expression.split(',')
+            clause = Always()
+            for block in blocks:
+                if not cls.NAIVE_SPEC.match(block):
+                    raise ValueError("Invalid simple block %r" % block)
+                clause &= cls.parse_block(block)
+
+            return clause
+
+        PREFIX_CARET = '^'
+        PREFIX_TILDE = '~'
+        PREFIX_COMPATIBLE = '~='
+        PREFIX_EQ = '=='
+        PREFIX_NEQ = '!='
+        PREFIX_GT = '>'
+        PREFIX_GTE = '>='
+        PREFIX_LT = '<'
+        PREFIX_LTE = '<='
+
+        PREFIX_ALIASES = {
+            '=': PREFIX_EQ,
+            '': PREFIX_EQ,
+        }
+
+        EMPTY_VALUES = ['*', 'x', 'X', None]
+
+        @classmethod
+        def parse_block(cls, expr):
+            if not cls.NAIVE_SPEC.match(expr):
+                raise ValueError("Invalid simple spec component: %r" % expr)
+            prefix, major_t, minor_t, patch_t, prerel, build = cls.NAIVE_SPEC.match(expr).groups()
+            prefix = cls.PREFIX_ALIASES.get(prefix, prefix)
+
+            major = None if major_t in cls.EMPTY_VALUES else int(major_t)
+            minor = None if minor_t in cls.EMPTY_VALUES else int(minor_t)
+            patch = None if patch_t in cls.EMPTY_VALUES else int(patch_t)
+
+            if major is None:  # '*'
+                target = Version(major=0, minor=0, patch=0)
+                if prefix not in (cls.PREFIX_EQ, cls.PREFIX_GTE):
+                    raise ValueError("Invalid simple spec: %r" % expr)
+            elif minor is None:
+                target = Version(major=major, minor=0, patch=0)
+            elif patch is None:
+                target = Version(major=major, minor=minor, patch=0)
+            else:
+                target = Version(
+                    major=major,
+                    minor=minor,
+                    patch=patch,
+                    prerelease=prerel.split('.') if prerel else (),
+                    build=build.split('.') if build else (),
+                )
+
+            if (major is None or minor is None or patch is None) and (prerel or build):
+                raise ValueError("Invalid simple spec: %r" % expr)
+
+            if build is not None and prefix not in (cls.PREFIX_EQ, cls.PREFIX_NEQ):
+                raise ValueError("Invalid simple spec: %r" % expr)
+
+            if prefix == cls.PREFIX_CARET:
+                # Accept anything with the same most-significant digit
+                if target.major:
+                    high = target.next_major()
+                elif target.minor:
+                    high = target.next_minor()
+                else:
+                    high = target.next_patch()
+                return Range(Range.OP_GTE, target) & Range(Range.OP_LT, high)
+
+            elif prefix == cls.PREFIX_TILDE:
+                assert major is not None
+                # Accept any higher patch in the same minor
+                # Might go higher if the initial version was a partial
+                if minor is None:
+                    high = target.next_major()
+                else:
+                    high = target.next_minor()
+                return Range(Range.OP_GTE, target) & Range(Range.OP_LT, high)
+
+            elif prefix == cls.PREFIX_COMPATIBLE:
+                assert major is not None
+                # ~1 is 1.0.0..2.0.0; ~=2.2 is 2.2.0..3.0.0; ~=1.4.5 is 1.4.5..1.5.0
+                if minor is None or patch is None:
+                    # We got a partial version
+                    high = target.next_major()
+                else:
+                    high = target.next_minor()
+                return Range(Range.OP_GTE, target) & Range(Range.OP_LT, high)
+
+            elif prefix == cls.PREFIX_EQ:
+                if major is None:
+                    return Range(Range.OP_GTE, target)
+                elif minor is None:
+                    return Range(Range.OP_GTE, target) & Range(Range.OP_LT, target.next_major())
+                elif patch is None:
+                    return Range(Range.OP_GTE, target) & Range(Range.OP_LT, target.next_minor())
+                elif build == '':
+                    return Range(Range.OP_EQ, target, build_policy=Range.BUILD_STRICT)
+                else:
+                    return Range(Range.OP_EQ, target)
+
+            elif prefix == cls.PREFIX_NEQ:
+                assert major is not None
+                if minor is None:
+                    # !=1.x => <1.0.0 || >=2.0.0
+                    return Range(Range.OP_LT, target) | Range(Range.OP_GTE, target.next_major())
+                elif patch is None:
+                    # !=1.2.x => <1.2.0 || >=1.3.0
+                    return Range(Range.OP_LT, target) | Range(Range.OP_GTE, target.next_minor())
+                elif prerel == '':
+                    # !=1.2.3-
+                    return Range(Range.OP_NEQ, target, prerelease_policy=Range.PRERELEASE_ALWAYS)
+                elif build == '':
+                    # !=1.2.3+ or !=1.2.3-a2+
+                    return Range(Range.OP_NEQ, target, build_policy=Range.BUILD_STRICT)
+                else:
+                    return Range(Range.OP_NEQ, target)
+
+            elif prefix == cls.PREFIX_GT:
+                assert major is not None
+                if minor is None:
+                    # >1.x => >=2.0
+                    return Range(Range.OP_GTE, target.next_major())
+                elif patch is None:
+                    return Range(Range.OP_GTE, target.next_minor())
+                else:
+                    return Range(Range.OP_GT, target)
+
+            elif prefix == cls.PREFIX_GTE:
+                return Range(Range.OP_GTE, target)
+
+            elif prefix == cls.PREFIX_LT:
+                assert major is not None
+                if prerel == '':
+                    # <1.2.3-
+                    return Range(Range.OP_LT, target, prerelease_policy=Range.PRERELEASE_ALWAYS)
+                return Range(Range.OP_LT, target)
+
+            else:
+                assert prefix == cls.PREFIX_LTE
+                assert major is not None
+                if minor is None:
+                    # <=1.x => <2.0
+                    return Range(Range.OP_LT, target.next_major())
+                elif patch is None:
+                    return Range(Range.OP_LT, target.next_minor())
+                else:
+                    return Range(Range.OP_LTE, target)
+
+
+class LegacySpec(SimpleSpec):
+    def __init__(self, *expressions):
+        warnings.warn(
+            "The Spec() class will be removed in 3.1; use SimpleSpec() instead.",
+            PendingDeprecationWarning,
+            stacklevel=2,
+        )
+
+        if len(expressions) > 1:
+            warnings.warn(
+                "Passing 2+ arguments to SimpleSpec will be removed in 3.0; concatenate them with ',' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        expression = ','.join(expressions)
+        super(LegacySpec, self).__init__(expression)
+
+    @property
+    def specs(self):
+        return list(self)
+
+    def __iter__(self):
+        warnings.warn(
+            "Iterating over the components of a SimpleSpec object will be removed in 3.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        try:
+            clauses = list(self.clause)
+        except TypeError:  # Not an iterable
+            clauses = [self.clause]
+        for clause in clauses:
+            yield SpecItem.from_matcher(clause)
+
+
+Spec = LegacySpec
+
+
+@BaseSpec.register_syntax
+class NpmSpec(BaseSpec):
+    SYNTAX = 'npm'
+
+    @classmethod
+    def _parse_to_clause(cls, expression):
+        return cls.Parser.parse(expression)
+
+    class Parser:
+        JOINER = '||'
+        HYPHEN = ' - '
+
+        NUMBER = r'x|X|\*|0|[1-9][0-9]*'
+        PART = r'[a-zA-Z0-9.-]*'
+        NPM_SPEC_BLOCK = re.compile(r"""
+            ^(?:v)?                     # Strip optional initial v
+            (?P<op><|<=|>=|>|=|\^|~|)   # Operator, can be empty
+            (?P<major>{nb})(?:\.(?P<minor>{nb})(?:\.(?P<patch>{nb}))?)?
+            (?:-(?P<prerel>{part}))?    # Optional re-release
+            (?:\+(?P<build>{part}))?    # Optional build
+            $""".format(nb=NUMBER, part=PART),
+            re.VERBOSE,
+        )
+
+        @classmethod
+        def range(cls, operator, target):
+            return Range(operator, target, prerelease_policy=Range.PRERELEASE_SAMEPATCH)
+
+        @classmethod
+        def parse(cls, expression):
+            result = Never()
+            groups = expression.split(cls.JOINER)
+            for group in groups:
+                group = group.strip()
+                if not group:
+                    group = '>=0.0.0'
+
+                subclauses = []
+                if cls.HYPHEN in group:
+                    low, high = group.split(cls.HYPHEN, 2)
+                    subclauses = cls.parse_simple('>=' + low) + cls.parse_simple('<=' + high)
+
+                else:
+                    blocks = group.split(' ')
+                    for block in blocks:
+                        if not cls.NPM_SPEC_BLOCK.match(block):
+                            raise ValueError("Invalid NPM block in %r: %r" % (expression, block))
+
+                        subclauses.extend(cls.parse_simple(block))
+
+                prerelease_clauses = []
+                non_prerel_clauses = []
+                for clause in subclauses:
+                    if clause.target.prerelease:
+                        if clause.operator in (Range.OP_GT, Range.OP_GTE):
+                            prerelease_clauses.append(Range(
+                                operator=Range.OP_LT,
+                                target=Version(
+                                    major=clause.target.major,
+                                    minor=clause.target.minor,
+                                    patch=clause.target.patch + 1,
+                                ),
+                                prerelease_policy=Range.PRERELEASE_ALWAYS,
+                            ))
+                        elif clause.operator in (Range.OP_LT, Range.OP_LTE):
+                            prerelease_clauses.append(Range(
+                                operator=Range.OP_GTE,
+                                target=Version(
+                                    major=clause.target.major,
+                                    minor=clause.target.minor,
+                                    patch=0,
+                                    prerelease=(),
+                                ),
+                                prerelease_policy=Range.PRERELEASE_ALWAYS,
+                            ))
+                        prerelease_clauses.append(clause)
+                        non_prerel_clauses.append(cls.range(
+                            operator=clause.operator,
+                            target=clause.target.truncate(),
+                        ))
+                    else:
+                        non_prerel_clauses.append(clause)
+                if prerelease_clauses:
+                    result |= AllOf(*prerelease_clauses)
+                result |= AllOf(*non_prerel_clauses)
+
+            return result
+
+        PREFIX_CARET = '^'
+        PREFIX_TILDE = '~'
+        PREFIX_EQ = '='
+        PREFIX_GT = '>'
+        PREFIX_GTE = '>='
+        PREFIX_LT = '<'
+        PREFIX_LTE = '<='
+
+        PREFIX_ALIASES = {
+            '': PREFIX_EQ,
+        }
+
+        PREFIX_TO_OPERATOR = {
+            PREFIX_EQ: Range.OP_EQ,
+            PREFIX_LT: Range.OP_LT,
+            PREFIX_LTE: Range.OP_LTE,
+            PREFIX_GTE: Range.OP_GTE,
+            PREFIX_GT: Range.OP_GT,
+        }
+
+        EMPTY_VALUES = ['*', 'x', 'X', None]
+
+        @classmethod
+        def parse_simple(cls, simple):
+            match = cls.NPM_SPEC_BLOCK.match(simple)
+
+            prefix, major_t, minor_t, patch_t, prerel, build = match.groups()
+
+            prefix = cls.PREFIX_ALIASES.get(prefix, prefix)
+            major = None if major_t in cls.EMPTY_VALUES else int(major_t)
+            minor = None if minor_t in cls.EMPTY_VALUES else int(minor_t)
+            patch = None if patch_t in cls.EMPTY_VALUES else int(patch_t)
+
+            if build is not None and prefix not in [cls.PREFIX_EQ]:
+                # Ignore the 'build' part when not comparing to a specific part.
+                build = None
+
+            if major is None:  # '*', 'x', 'X'
+                target = Version(major=0, minor=0, patch=0)
+                if prefix not in [cls.PREFIX_EQ, cls.PREFIX_GTE]:
+                    raise ValueError("Invalid expression %r" % simple)
+                prefix = cls.PREFIX_GTE
+            elif minor is None:
+                target = Version(major=major, minor=0, patch=0)
+            elif patch is None:
+                target = Version(major=major, minor=minor, patch=0)
+            else:
+                target = Version(
+                    major=major,
+                    minor=minor,
+                    patch=patch,
+                    prerelease=prerel.split('.') if prerel else (),
+                    build=build.split('.') if build else (),
+                )
+
+            if (major is None or minor is None or patch is None) and (prerel or build):
+                raise ValueError("Invalid NPM spec: %r" % simple)
+
+            if prefix == cls.PREFIX_CARET:
+                if target.major:  # ^1.2.4 => >=1.2.4 <2.0.0 ; ^1.x => >=1.0.0 <2.0.0
+                    high = target.truncate().next_major()
+                elif target.minor:  # ^0.1.2 => >=0.1.2 <0.2.0
+                    high = target.truncate().next_minor()
+                elif minor is None:  # ^0.x => >=0.0.0 <1.0.0
+                    high = target.truncate().next_major()
+                elif patch is None:  # ^0.2.x => >=0.2.0 <0.3.0
+                    high = target.truncate().next_minor()
+                else:  # ^0.0.1 => >=0.0.1 <0.0.2
+                    high = target.truncate().next_patch()
+                return [cls.range(Range.OP_GTE, target), cls.range(Range.OP_LT, high)]
+
+            elif prefix == cls.PREFIX_TILDE:
+                assert major is not None
+                if minor is None:  # ~1.x => >=1.0.0 <2.0.0
+                    high = target.next_major()
+                else:  # ~1.2.x => >=1.2.0 <1.3.0; ~1.2.3 => >=1.2.3 <1.3.0
+                    high = target.next_minor()
+                return [cls.range(Range.OP_GTE, target), cls.range(Range.OP_LT, high)]
+
+            elif prefix == cls.PREFIX_EQ:
+                if major is None:
+                    return [cls.range(Range.OP_GTE, target)]
+                elif minor is None:
+                    return [cls.range(Range.OP_GTE, target), cls.range(Range.OP_LT, target.next_major())]
+                elif patch is None:
+                    return [cls.range(Range.OP_GTE, target), cls.range(Range.OP_LT, target.next_minor())]
+                else:
+                    return [cls.range(Range.OP_EQ, target)]
+
+            elif prefix == cls.PREFIX_GT:
+                assert major is not None
+                if minor is None:  # >1.x
+                    return [cls.range(Range.OP_GTE, target.next_major())]
+                elif patch is None:  # >1.2.x => >=1.3.0
+                    return [cls.range(Range.OP_GTE, target.next_minor())]
+                else:
+                    return [cls.range(Range.OP_GT, target)]
+
+            elif prefix == cls.PREFIX_GTE:
+                return [cls.range(Range.OP_GTE, target)]
+
+            elif prefix == cls.PREFIX_LT:
+                assert major is not None
+                return [cls.range(Range.OP_LT, target)]
+
+            else:
+                assert prefix == cls.PREFIX_LTE
+                assert major is not None
+                if minor is None:  # <=1.x => <2.0.0
+                    return [cls.range(Range.OP_LT, target.next_major())]
+                elif patch is None:  # <=1.2.x => <1.3.0
+                    return [cls.range(Range.OP_LT, target.next_minor())]
+                else:
+                    return [cls.range(Range.OP_LTE, target)]

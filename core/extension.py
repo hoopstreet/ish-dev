@@ -1,382 +1,179 @@
 from __future__ import annotations
 
-import json
-import os
+import functools
 import re
-import subprocess
-import warnings
-from setuptools.errors import SetupError
-from enum import IntEnum, auto
-from functools import lru_cache
-from typing import (
-    Any,
-    Dict,
-    List,
-    Literal,
-    NewType,
-    Optional,
-    Sequence,
-    TYPE_CHECKING,
-    Union,
-    cast,
-)
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
+from setuptools._path import StrPath
+
+from .monkey import get_unpatched
+
+import distutils.core
+import distutils.errors
+import distutils.extension
+
+
+def _have_cython() -> bool:
+    """
+    Return True if Cython can be imported.
+    """
+    cython_impl = 'Cython.Distutils.build_ext'
+    try:
+        # from (cython_impl) import build_ext
+        __import__(cython_impl, fromlist=['build_ext']).build_ext
+    except Exception:
+        return False
+    return True
+
+
+# for compatibility
+have_pyrex = _have_cython
 if TYPE_CHECKING:
-    from semantic_version import SimpleSpec
+    # Work around a mypy issue where type[T] can't be used as a base: https://github.com/python/mypy/issues/10962
+    from distutils.core import Extension as _Extension
+else:
+    _Extension = get_unpatched(distutils.core.Extension)
 
-from ._utils import check_subprocess_output, format_called_process_error, Env
 
-
-class Binding(IntEnum):
+class Extension(_Extension):
     """
-    Enumeration of possible Rust binding types supported by ``setuptools-rust``.
+    Describes a single extension module.
 
-    Attributes:
-        PyO3: This is an extension built using
-            `PyO3 <https://github.com/pyo3/pyo3>`_.
-        RustCPython: This is an extension built using
-            `rust-cpython <https://github.com/dgrunwald/rust-cpython>`_.
-        NoBinding: Bring your own bindings for the extension.
-        Exec: Build an executable instead of an extension.
+    This means that all source files will be compiled into a single binary file
+    ``<module path>.<suffix>`` (with ``<module path>`` derived from ``name`` and
+    ``<suffix>`` defined by one of the values in
+    ``importlib.machinery.EXTENSION_SUFFIXES``).
+
+    In the case ``.pyx`` files are passed as ``sources and`` ``Cython`` is **not**
+    installed in the build environment, ``setuptools`` may also try to look for the
+    equivalent ``.cpp`` or ``.c`` files.
+
+    :arg str name:
+      the full name of the extension, including any packages -- ie.
+      *not* a filename or pathname, but Python dotted name
+
+    :arg Iterable[str | os.PathLike[str]] sources:
+      iterable of source filenames, (except strings, which could be misinterpreted
+      as a single filename), relative to the distribution root
+      (where the setup script lives), in Unix form (slash-separated)
+      for portability.  Source files may be C, C++, SWIG (.i),
+      platform-specific resource files, or whatever else is recognized
+      by the "build_ext" command as source for a Python extension.
+
+    :keyword list[str] include_dirs:
+      list of directories to search for C/C++ header files (in Unix
+      form for portability)
+
+    :keyword list[tuple[str, str|None]] define_macros:
+      list of macros to define; each macro is defined using a 2-tuple:
+      the first item corresponding to the name of the macro and the second
+      item either a string with its value or None to
+      define it without a particular value (equivalent of "#define
+      FOO" in source or -DFOO on Unix C compiler command line)
+
+    :keyword list[str] undef_macros:
+      list of macros to undefine explicitly
+
+    :keyword list[str] library_dirs:
+      list of directories to search for C/C++ libraries at link time
+
+    :keyword list[str] libraries:
+      list of library names (not filenames or paths) to link against
+
+    :keyword list[str] runtime_library_dirs:
+      list of directories to search for C/C++ libraries at run time
+      (for shared extensions, this is when the extension is loaded).
+      Setting this will cause an exception during build on Windows
+      platforms.
+
+    :keyword list[str] extra_objects:
+      list of extra files to link with (eg. object files not implied
+      by 'sources', static library that must be explicitly specified,
+      binary resource files, etc.)
+
+    :keyword list[str] extra_compile_args:
+      any extra platform- and compiler-specific information to use
+      when compiling the source files in 'sources'.  For platforms and
+      compilers where "command line" makes sense, this is typically a
+      list of command-line arguments, but for other platforms it could
+      be anything.
+
+    :keyword list[str] extra_link_args:
+      any extra platform- and compiler-specific information to use
+      when linking object files together to create the extension (or
+      to create a new static Python interpreter).  Similar
+      interpretation as for 'extra_compile_args'.
+
+    :keyword list[str] export_symbols:
+      list of symbols to be exported from a shared extension.  Not
+      used on all platforms, and not generally necessary for Python
+      extensions, which typically export exactly one symbol: "init" +
+      extension_name.
+
+    :keyword list[str] swig_opts:
+      any extra options to pass to SWIG if a source file has the .i
+      extension.
+
+    :keyword list[str] depends:
+      list of files that the extension depends on
+
+    :keyword str language:
+      extension language (i.e. "c", "c++", "objc"). Will be detected
+      from the source extensions if not provided.
+
+    :keyword bool optional:
+      specifies that a build failure in the extension should not abort the
+      build process, but simply not install the failing extension.
+
+    :keyword bool py_limited_api:
+      opt-in flag for the usage of :doc:`Python's limited API <python:c-api/stable>`.
+
+    :raises setuptools.errors.PlatformError: if ``runtime_library_dirs`` is
+      specified on Windows. (since v63)
     """
 
-    PyO3 = auto()
-    RustCPython = auto()
-    NoBinding = auto()
-    Exec = auto()
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}.{self.name}"
-
-
-class Strip(IntEnum):
-    """
-    Enumeration of modes for stripping symbols from the built extension.
-
-    Attributes:
-        No: Do not strip symbols.
-        Debug: Strip debug symbols.
-        All: Strip all symbols.
-    """
-
-    No = auto()
-    Debug = auto()
-    All = auto()
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}.{self.name}"
-
-
-class RustExtension:
-    """Used to define a rust extension module and its build configuration.
-
-    Args:
-        target: The full Python dotted name of the extension, including any
-            packages, i.e *not* a filename or pathname. It is possible to
-            specify multiple binaries, if extension uses ``Binding.Exec``
-            binding mode. In that case first argument has to be dictionary.
-            Keys of the dictionary correspond to the rust binary names and
-            values are the full dotted name to place the executable inside
-            the python package. To install executables with kebab-case names,
-            the final part of the dotted name can be in kebab-case. For
-            example, `hello_world.hello-world` will install an executable
-            named `hello-world`.
-        path: Path to the ``Cargo.toml`` manifest file.
-        args: A list of extra arguments to be passed to Cargo. For example,
-            ``args=["--no-default-features"]`` will disable the default
-            features listed in ``Cargo.toml``.
-        cargo_manifest_args: A list of extra arguments to be passed to Cargo.
-            These arguments will be passed to every ``cargo`` command, not just
-            ``cargo build``. For valid options, see
-            `the Cargo Book <https://doc.rust-lang.org/cargo/commands/cargo-build.html#manifest-options>`_.
-            For example, ``cargo_manifest_args=["--locked"]`` will require
-            ``Cargo.lock`` files are up to date.
-        features: Cargo `--features` to add to the build.
-        rustc_flags: A list of additional flags passed to `cargo rustc`. These
-            only affect the final artifact, usually you should set the
-            `RUSTFLAGS` environment variable.
-        rust_version: Minimum Rust compiler version required for this
-            extension.
-        quiet: Suppress Cargo's output.
-        debug: Controls whether ``--debug`` or ``--release`` is passed to
-            Cargo. If set to `None` (the default) then build type is
-            automatic: ``inplace`` build will be a debug build, ``install``
-            and ``wheel`` builds will be release.
-        binding: Informs ``setuptools_rust`` which Python binding is in use.
-        strip: Strip symbols from final file. Does nothing for debug build.
-        native: Build extension or executable with ``-Ctarget-cpu=native``
-            (deprecated, set environment variable RUSTFLAGS=-Ctarget-cpu=native).
-        script: Generate console script for executable if ``Binding.Exec`` is
-            used (deprecated, just use ``RustBin`` instead).
-        optional: If it is true, a build failure in the extension will not
-            abort the build process, and instead simply not install the failing
-            extension.
-        py_limited_api: Deprecated.
-        env: Environment variables to use when calling cargo or rustc (``env=``
-            in ``subprocess.Popen``). setuptools-rust may add additional
-            variables or modify ``PATH``.
-    """
+    # These 4 are set and used in setuptools/command/build_ext.py
+    # The lack of a default value and risk of `AttributeError` is purposeful
+    # to avoid people forgetting to call finalize_options if they modify the extension list.
+    # See example/rationale in https://github.com/pypa/setuptools/issues/4529.
+    _full_name: str  #: Private API, internal use only.
+    _links_to_dynamic: bool  #: Private API, internal use only.
+    _needs_stub: bool  #: Private API, internal use only.
+    _file_name: str  #: Private API, internal use only.
 
     def __init__(
         self,
-        target: Union[str, Dict[str, str]],
-        path: str = "Cargo.toml",
-        args: Optional[Sequence[str]] = (),
-        cargo_manifest_args: Optional[Sequence[str]] = (),
-        features: Optional[Sequence[str]] = (),
-        rustc_flags: Optional[Sequence[str]] = (),
-        rust_version: Optional[str] = None,
-        quiet: bool = False,
-        debug: Optional[bool] = None,
-        binding: Binding = Binding.PyO3,
-        strip: Strip = Strip.No,
-        script: bool = False,
-        native: bool = False,
-        optional: bool = False,
-        py_limited_api: Literal["auto", True, False] = "auto",
-        env: Optional[Dict[str, str]] = None,
-    ):
-        if isinstance(target, dict):
-            name = "; ".join("%s=%s" % (key, val) for key, val in target.items())
-        else:
-            name = target
-            target = {"": target}
-
-        self.name = name
-        self.target = target
-        self.path = os.path.relpath(path)  # relative path to Cargo manifest file
-        self.args = tuple(args or ())
-        self.cargo_manifest_args = tuple(cargo_manifest_args or ())
-        self.features = tuple(features or ())
-        self.rustc_flags = tuple(rustc_flags or ())
-        self.rust_version = rust_version
-        self.quiet = quiet
-        self.debug = debug
-        self.binding = binding
-        self.strip = strip
-        self.script = script
-        self.optional = optional
+        name: str,
+        sources: Iterable[StrPath],
+        *args,
+        py_limited_api: bool = False,
+        **kw,
+    ) -> None:
+        # The *args is needed for compatibility as calls may use positional
+        # arguments. py_limited_api may be set only via keyword.
         self.py_limited_api = py_limited_api
-        self.env = Env(env)
-
-        if native:
-            warnings.warn(
-                "`native` is deprecated, set RUSTFLAGS=-Ctarget-cpu=native instead.",
-                DeprecationWarning,
-            )
-            # match old behaviour of only setting flag for top-level crate;
-            # setting for `rustflags` is strictly better
-            self.rustc_flags = (*self.rustc_flags, "-Ctarget-cpu=native")
-
-        if binding == Binding.Exec and script:
-            warnings.warn(
-                "`Binding.Exec` with `script=True` is deprecated, use `RustBin` instead.",
-                DeprecationWarning,
-            )
-
-        if self.py_limited_api != "auto":
-            warnings.warn(
-                "`RustExtension.py_limited_api` is deprecated, use [bdist_wheel] configuration "
-                "in `setup.cfg` or `DIST_EXTRA_CONFIG` to build abi3 wheels.",
-                DeprecationWarning,
-            )
-
-    def get_lib_name(self, *, quiet: bool) -> str:
-        """Parse Cargo.toml to get the name of the shared library."""
-        metadata = self.metadata(quiet=quiet)
-        root_key = metadata["resolve"]["root"]
-        [pkg] = [p for p in metadata["packages"] if p["id"] == root_key]
-        name = pkg["targets"][0]["name"]
-        assert isinstance(name, str)
-        return re.sub(r"[./\\-]", "_", name)
-
-    def get_rust_version(self) -> Optional[SimpleSpec]:  # type: ignore[no-any-unimported]
-        if self.rust_version is None:
-            return None
-        try:
-            from semantic_version import SimpleSpec
-
-            return SimpleSpec(self.rust_version)
-        except ValueError:
-            raise SetupError(
-                "Can not parse rust compiler version: %s", self.rust_version
-            )
-
-    def get_cargo_profile(self) -> Optional[str]:
-        try:
-            index = self.args.index("--profile")
-            return self.args[index + 1]
-        except ValueError:
-            pass
-        except IndexError:
-            raise SetupError("Can not parse cargo profile from %s", self.args)
-
-        # Handle `--profile=<profile>`
-        profile_args = [p for p in self.args if p.startswith("--profile=")]
-        if profile_args:
-            profile = profile_args[0].split("=", 1)[1]
-            if not profile:
-                raise SetupError("Can not parse cargo profile from %s", self.args)
-            return profile
-        else:
-            return None
-
-    def entry_points(self) -> List[str]:
-        entry_points = []
-        if self.script and self.binding == Binding.Exec:
-            for executable, mod in self.target.items():
-                base_mod, name = mod.rsplit(".")
-                script = "%s=%s.%s:run" % (name, base_mod, _script_name(executable))
-                entry_points.append(script)
-
-        return entry_points
-
-    def install_script(self, module_name: str, exe_path: str) -> None:
-        if self.script and self.binding == Binding.Exec:
-            dirname, executable = os.path.split(exe_path)
-            script_name = _script_name(module_name)
-            os.makedirs(dirname, exist_ok=True)
-            file = os.path.join(dirname, f"{script_name}.py")
-            with open(file, "w") as f:
-                f.write(_SCRIPT_TEMPLATE.format(executable=repr(executable)))
-
-    def metadata(self, *, quiet: bool) -> "CargoMetadata":
-        """Returns cargo metadata for this extension package.
-
-        Cached - will only execute cargo on first invocation.
-        """
-
-        return self._metadata(os.environ.get("CARGO", "cargo"), quiet)
-
-    @lru_cache()
-    def _metadata(self, cargo: str, quiet: bool) -> "CargoMetadata":
-        metadata_command = [
-            cargo,
-            "metadata",
-            "--manifest-path",
-            self.path,
-            "--format-version",
-            "1",
-        ]
-        if self.cargo_manifest_args:
-            metadata_command.extend(self.cargo_manifest_args)
-
-        try:
-            # If quiet, capture stderr and only show it on exceptions
-            # If not quiet, let stderr be inherited
-            stderr = subprocess.PIPE if quiet else None
-            payload = check_subprocess_output(
-                metadata_command, stderr=stderr, encoding="latin-1", env=self.env.env
-            )
-        except subprocess.CalledProcessError as e:
-            raise SetupError(format_called_process_error(e))
-        try:
-            return cast(CargoMetadata, json.loads(payload))
-        except json.decoder.JSONDecodeError as e:
-            raise SetupError(
-                f"""
-                Error parsing output of cargo metadata as json; received:
-                {payload}
-                """
-            ) from e
-
-    def _uses_exec_binding(self) -> bool:
-        return self.binding == Binding.Exec
-
-
-class RustBin(RustExtension):
-    """Used to define a Rust binary and its build configuration.
-
-    Args:
-        target: Rust binary target name.
-        path: Path to the ``Cargo.toml`` manifest file.
-        args: A list of extra arguments to be passed to Cargo. For example,
-            ``args=["--no-default-features"]`` will disable the default
-            features listed in ``Cargo.toml``.
-        cargo_manifest_args: A list of extra arguments to be passed to Cargo.
-            These arguments will be passed to every ``cargo`` command, not just
-            ``cargo build``. For valid options, see
-            `the Cargo Book <https://doc.rust-lang.org/cargo/commands/cargo-build.html#manifest-options>`_.
-            For example, ``cargo_manifest_args=["--locked"]`` will require
-            ``Cargo.lock`` files are up to date.
-        features: Cargo `--features` to add to the build.
-        rust_version: Minimum Rust compiler version required for this bin.
-        quiet: Suppress Cargo's output.
-        debug: Controls whether ``--debug`` or ``--release`` is passed to
-            Cargo. If set to `None` (the default) then build type is
-            automatic: ``inplace`` build will be a debug build, ``install``
-            and ``wheel`` builds will be release.
-        strip: Strip symbols from final file. Does nothing for debug build.
-        optional: If it is true, a build failure in the bin will not
-            abort the build process, and instead simply not install the failing
-            bin.
-    """
-
-    def __init__(
-        self,
-        target: Union[str, Dict[str, str]],
-        path: str = "Cargo.toml",
-        args: Optional[Sequence[str]] = (),
-        cargo_manifest_args: Optional[Sequence[str]] = (),
-        features: Optional[Sequence[str]] = (),
-        rust_version: Optional[str] = None,
-        quiet: bool = False,
-        debug: Optional[bool] = None,
-        strip: Strip = Strip.No,
-        optional: bool = False,
-        env: Optional[dict[str, str]] = None,
-    ):
         super().__init__(
-            target=target,
-            path=path,
-            args=args,
-            cargo_manifest_args=cargo_manifest_args,
-            features=features,
-            rust_version=rust_version,
-            quiet=quiet,
-            debug=debug,
-            binding=Binding.Exec,
-            optional=optional,
-            strip=strip,
-            py_limited_api=False,
-            env=env,
+            name,
+            sources,  # type: ignore[arg-type] # Vendored version of setuptools supports PathLike
+            *args,
+            **kw,
         )
 
-    def entry_points(self) -> List[str]:
-        return []
+    def _convert_pyx_sources_to_lang(self):
+        """
+        Replace sources with .pyx extensions to sources with the target
+        language extension. This mechanism allows language authors to supply
+        pre-converted sources but to prefer the .pyx sources.
+        """
+        if _have_cython():
+            # the build has Cython, so allow it to compile the .pyx files
+            return
+        lang = self.language or ''
+        target_ext = '.cpp' if lang.lower() == 'c++' else '.c'
+        sub = functools.partial(re.sub, '.pyx$', target_ext)
+        self.sources = list(map(sub, self.sources))
 
 
-CargoMetadata = NewType("CargoMetadata", Dict[str, Any])
-
-
-def _script_name(executable: str) -> str:
-    """Generates the name of the installed Python script for an executable.
-
-    Because Python modules must be snake_case, this generated script name will
-    replace `-` with `_`.
-
-    >>> _script_name("hello-world")
-    '_gen_hello_world'
-
-    >>> _script_name("foo_bar")
-    '_gen_foo_bar'
-
-    >>> _script_name("_gen_foo_bar")
-    '_gen__gen_foo_bar'
-    """
-    script = executable.replace("-", "_")
-    return f"_gen_{script}"
-
-
-_SCRIPT_TEMPLATE = """
-import os
-import sys
-
-def run():
-    path = os.path.split(__file__)[0]
-    file = os.path.join(path, {executable})
-    if os.path.isfile(file):
-        os.execv(file, sys.argv)
-    else:
-        raise RuntimeError("can't find " + file)
-"""
+class Library(Extension):
+    """Just like a regular Extension, but built as a library instead"""

@@ -1,422 +1,272 @@
-"""distutils.unixccompiler
-
-Contains the UnixCCompiler class, a subclass of CCompiler that handles
-the "typical" Unix-style command-line C compiler:
-  * macros defined with -Dname[=value]
-  * macros undefined with -Uname
-  * include search directories specified with -Idir
-  * libraries specified with -lllib
-  * library search directories specified with -Ldir
-  * compile handled by 'cc' (or similar) executable with -c option:
-    compiles .c to .o
-  * link static library handled by 'ar' command (possibly with 'ranlib')
-  * link shared library handled by 'cc -shared'
-"""
+"""Unix."""
 
 from __future__ import annotations
 
-import itertools
 import os
-import re
-import shlex
 import sys
-from collections.abc import Iterable
+from configparser import ConfigParser
+from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
 
-from ... import sysconfig
-from ..._log import log
-from ..._macos_compat import compiler_fixup
-from ..._modified import newer
-from ...compat import consolidate_linker_args
-from ...errors import DistutilsExecError
-from . import base
-from .base import _Macro, gen_lib_options, gen_preprocess_options
-from .errors import (
-    CompileError,
-    LibError,
-    LinkError,
-)
+from .api import PlatformDirsABC
 
-# XXX Things not currently handled:
-#   * optimization/debug/warning flags; we just use whatever's in Python's
-#     Makefile and live with it.  Is this adequate?  If not, we might
-#     have to have a bunch of subclasses GNUCCompiler, SGICCompiler,
-#     SunCCompiler, and I suspect down that road lies madness.
-#   * even if we don't know a warning flag from an optimization flag,
-#     we need some way for outsiders to feed preprocessor/compiler/linker
-#     flags in to us -- eg. a sysadmin might want to mandate certain flags
-#     via a site config file, or a user might want to set something for
-#     compiling this module distribution only via the setup.py command
-#     line, whatever.  As long as these options come from something on the
-#     current system, they can be as system-dependent as they like, and we
-#     should just happily stuff them into the preprocessor/compiler/linker
-#     options and carry on.
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+if sys.platform == "win32":
+
+    def getuid() -> NoReturn:
+        msg = "should only be used on Unix"
+        raise RuntimeError(msg)
+
+else:
+    from os import getuid
 
 
-def _split_env(cmd):
+class Unix(PlatformDirsABC):  # noqa: PLR0904
     """
-    For macOS, split command into 'env' portion (if any)
-    and the rest of the linker command.
+    On Unix/Linux, we follow the `XDG Basedir Spec <https://specifications.freedesktop.org/basedir-spec/basedir-spec-
+    latest.html>`_.
 
-    >>> _split_env(['a', 'b', 'c'])
-    ([], ['a', 'b', 'c'])
-    >>> _split_env(['/usr/bin/env', 'A=3', 'gcc'])
-    (['/usr/bin/env', 'A=3'], ['gcc'])
+    The spec allows overriding directories with environment variables. The examples shown are the default values,
+    alongside the name of the environment variable that overrides them. Makes use of the `appname
+    <platformdirs.api.PlatformDirsABC.appname>`, `version <platformdirs.api.PlatformDirsABC.version>`, `multipath
+    <platformdirs.api.PlatformDirsABC.multipath>`, `opinion <platformdirs.api.PlatformDirsABC.opinion>`, `ensure_exists
+    <platformdirs.api.PlatformDirsABC.ensure_exists>`.
+
     """
-    pivot = 0
-    if os.path.basename(cmd[0]) == "env":
-        pivot = 1
-        while '=' in cmd[pivot]:
-            pivot += 1
-    return cmd[:pivot], cmd[pivot:]
 
+    @property
+    def user_data_dir(self) -> str:
+        """
+        :return: data directory tied to the user, e.g. ``~/.local/share/$appname/$version`` or
+         ``$XDG_DATA_HOME/$appname/$version``
+        """
+        path = os.environ.get("XDG_DATA_HOME", "")
+        if not path.strip():
+            path = os.path.expanduser("~/.local/share")  # noqa: PTH111
+        return self._append_app_name_and_version(path)
 
-def _split_aix(cmd):
-    """
-    AIX platforms prefix the compiler with the ld_so_aix
-    script, so split that from the linker command.
+    @property
+    def _site_data_dirs(self) -> list[str]:
+        path = os.environ.get("XDG_DATA_DIRS", "")
+        if not path.strip():
+            path = f"/usr/local/share{os.pathsep}/usr/share"
+        return [self._append_app_name_and_version(p) for p in path.split(os.pathsep)]
 
-    >>> _split_aix(['a', 'b', 'c'])
-    ([], ['a', 'b', 'c'])
-    >>> _split_aix(['/bin/foo/ld_so_aix', 'gcc'])
-    (['/bin/foo/ld_so_aix'], ['gcc'])
-    """
-    pivot = os.path.basename(cmd[0]) == 'ld_so_aix'
-    return cmd[:pivot], cmd[pivot:]
+    @property
+    def site_data_dir(self) -> str:
+        """
+        :return: data directories shared by users (if `multipath <platformdirs.api.PlatformDirsABC.multipath>` is
+         enabled and ``XDG_DATA_DIRS`` is set and a multi path the response is also a multi path separated by the
+         OS path separator), e.g. ``/usr/local/share/$appname/$version`` or ``/usr/share/$appname/$version``
+        """
+        # XDG default for $XDG_DATA_DIRS; only first, if multipath is False
+        dirs = self._site_data_dirs
+        if not self.multipath:
+            return dirs[0]
+        return os.pathsep.join(dirs)
 
+    @property
+    def user_config_dir(self) -> str:
+        """
+        :return: config directory tied to the user, e.g. ``~/.config/$appname/$version`` or
+         ``$XDG_CONFIG_HOME/$appname/$version``
+        """
+        path = os.environ.get("XDG_CONFIG_HOME", "")
+        if not path.strip():
+            path = os.path.expanduser("~/.config")  # noqa: PTH111
+        return self._append_app_name_and_version(path)
 
-def _linker_params(linker_cmd, compiler_cmd):
-    """
-    The linker command usually begins with the compiler
-    command (possibly multiple elements), followed by zero or more
-    params for shared library building.
+    @property
+    def _site_config_dirs(self) -> list[str]:
+        path = os.environ.get("XDG_CONFIG_DIRS", "")
+        if not path.strip():
+            path = "/etc/xdg"
+        return [self._append_app_name_and_version(p) for p in path.split(os.pathsep)]
 
-    If the LDSHARED env variable overrides the linker command,
-    however, the commands may not match.
+    @property
+    def site_config_dir(self) -> str:
+        """
+        :return: config directories shared by users (if `multipath <platformdirs.api.PlatformDirsABC.multipath>`
+         is enabled and ``XDG_CONFIG_DIRS`` is set and a multi path the response is also a multi path separated by
+         the OS path separator), e.g. ``/etc/xdg/$appname/$version``
+        """
+        # XDG default for $XDG_CONFIG_DIRS only first, if multipath is False
+        dirs = self._site_config_dirs
+        if not self.multipath:
+            return dirs[0]
+        return os.pathsep.join(dirs)
 
-    Return the best guess of the linker parameters by stripping
-    the linker command. If the compiler command does not
-    match the linker command, assume the linker command is
-    just the first element.
+    @property
+    def user_cache_dir(self) -> str:
+        """
+        :return: cache directory tied to the user, e.g. ``~/.cache/$appname/$version`` or
+         ``~/$XDG_CACHE_HOME/$appname/$version``
+        """
+        path = os.environ.get("XDG_CACHE_HOME", "")
+        if not path.strip():
+            path = os.path.expanduser("~/.cache")  # noqa: PTH111
+        return self._append_app_name_and_version(path)
 
-    >>> _linker_params('gcc foo bar'.split(), ['gcc'])
-    ['foo', 'bar']
-    >>> _linker_params('gcc foo bar'.split(), ['other'])
-    ['foo', 'bar']
-    >>> _linker_params('ccache gcc foo bar'.split(), 'ccache gcc'.split())
-    ['foo', 'bar']
-    >>> _linker_params(['gcc'], ['gcc'])
-    []
-    """
-    c_len = len(compiler_cmd)
-    pivot = c_len if linker_cmd[:c_len] == compiler_cmd else 1
-    return linker_cmd[pivot:]
+    @property
+    def site_cache_dir(self) -> str:
+        """:return: cache directory shared by users, e.g. ``/var/cache/$appname/$version``"""
+        return self._append_app_name_and_version("/var/cache")
 
+    @property
+    def user_state_dir(self) -> str:
+        """
+        :return: state directory tied to the user, e.g. ``~/.local/state/$appname/$version`` or
+         ``$XDG_STATE_HOME/$appname/$version``
+        """
+        path = os.environ.get("XDG_STATE_HOME", "")
+        if not path.strip():
+            path = os.path.expanduser("~/.local/state")  # noqa: PTH111
+        return self._append_app_name_and_version(path)
 
-class Compiler(base.Compiler):
-    compiler_type = 'unix'
+    @property
+    def user_log_dir(self) -> str:
+        """:return: log directory tied to the user, same as `user_state_dir` if not opinionated else ``log`` in it"""
+        path = self.user_state_dir
+        if self.opinion:
+            path = os.path.join(path, "log")  # noqa: PTH118
+            self._optionally_create_directory(path)
+        return path
 
-    # These are used by CCompiler in two places: the constructor sets
-    # instance attributes 'preprocessor', 'compiler', etc. from them, and
-    # 'set_executable()' allows any of these to be set.  The defaults here
-    # are pretty generic; they will probably have to be set by an outsider
-    # (eg. using information discovered by the sysconfig about building
-    # Python extensions).
-    executables = {
-        'preprocessor': None,
-        'compiler': ["cc"],
-        'compiler_so': ["cc"],
-        'compiler_cxx': ["c++"],
-        'compiler_so_cxx': ["c++"],
-        'linker_so': ["cc", "-shared"],
-        'linker_so_cxx': ["c++", "-shared"],
-        'linker_exe': ["cc"],
-        'linker_exe_cxx': ["c++", "-shared"],
-        'archiver': ["ar", "-cr"],
-        'ranlib': None,
-    }
+    @property
+    def user_documents_dir(self) -> str:
+        """:return: documents directory tied to the user, e.g. ``~/Documents``"""
+        return _get_user_media_dir("XDG_DOCUMENTS_DIR", "~/Documents")
 
-    if sys.platform[:6] == "darwin":
-        executables['ranlib'] = ["ranlib"]
+    @property
+    def user_downloads_dir(self) -> str:
+        """:return: downloads directory tied to the user, e.g. ``~/Downloads``"""
+        return _get_user_media_dir("XDG_DOWNLOAD_DIR", "~/Downloads")
 
-    # Needed for the filename generation methods provided by the base
-    # class, CCompiler.  NB. whoever instantiates/uses a particular
-    # UnixCCompiler instance should set 'shared_lib_ext' -- we set a
-    # reasonable common default here, but it's not necessarily used on all
-    # Unices!
+    @property
+    def user_pictures_dir(self) -> str:
+        """:return: pictures directory tied to the user, e.g. ``~/Pictures``"""
+        return _get_user_media_dir("XDG_PICTURES_DIR", "~/Pictures")
 
-    src_extensions = [".c", ".C", ".cc", ".cxx", ".cpp", ".m"]
-    obj_extension = ".o"
-    static_lib_extension = ".a"
-    shared_lib_extension = ".so"
-    dylib_lib_extension = ".dylib"
-    xcode_stub_lib_extension = ".tbd"
-    static_lib_format = shared_lib_format = dylib_lib_format = "lib%s%s"
-    xcode_stub_lib_format = dylib_lib_format
-    if sys.platform == "cygwin":
-        exe_extension = ".exe"
-        shared_lib_extension = ".dll.a"
-        dylib_lib_extension = ".dll"
-        dylib_lib_format = "cyg%s%s"
+    @property
+    def user_videos_dir(self) -> str:
+        """:return: videos directory tied to the user, e.g. ``~/Videos``"""
+        return _get_user_media_dir("XDG_VIDEOS_DIR", "~/Videos")
 
-    def _fix_lib_args(self, libraries, library_dirs, runtime_library_dirs):
-        """Remove standard library path from rpath"""
-        libraries, library_dirs, runtime_library_dirs = super()._fix_lib_args(
-            libraries, library_dirs, runtime_library_dirs
-        )
-        libdir = sysconfig.get_config_var('LIBDIR')
-        if (
-            runtime_library_dirs
-            and libdir.startswith("/usr/lib")
-            and (libdir in runtime_library_dirs)
-        ):
-            runtime_library_dirs.remove(libdir)
-        return libraries, library_dirs, runtime_library_dirs
+    @property
+    def user_music_dir(self) -> str:
+        """:return: music directory tied to the user, e.g. ``~/Music``"""
+        return _get_user_media_dir("XDG_MUSIC_DIR", "~/Music")
 
-    def preprocess(
-        self,
-        source: str | os.PathLike[str],
-        output_file: str | os.PathLike[str] | None = None,
-        macros: list[_Macro] | None = None,
-        include_dirs: list[str] | tuple[str, ...] | None = None,
-        extra_preargs: list[str] | None = None,
-        extra_postargs: Iterable[str] | None = None,
-    ):
-        fixed_args = self._fix_compile_args(None, macros, include_dirs)
-        ignore, macros, include_dirs = fixed_args
-        pp_opts = gen_preprocess_options(macros, include_dirs)
-        pp_args = self.preprocessor + pp_opts
-        if output_file:
-            pp_args.extend(['-o', output_file])
-        if extra_preargs:
-            pp_args[:0] = extra_preargs
-        if extra_postargs:
-            pp_args.extend(extra_postargs)
-        pp_args.append(source)
+    @property
+    def user_desktop_dir(self) -> str:
+        """:return: desktop directory tied to the user, e.g. ``~/Desktop``"""
+        return _get_user_media_dir("XDG_DESKTOP_DIR", "~/Desktop")
 
-        # reasons to preprocess:
-        # - force is indicated
-        # - output is directed to stdout
-        # - source file is newer than the target
-        preprocess = self.force or output_file is None or newer(source, output_file)
-        if not preprocess:
-            return
+    @property
+    def user_runtime_dir(self) -> str:
+        """
+        :return: runtime directory tied to the user, e.g. ``/run/user/$(id -u)/$appname/$version`` or
+         ``$XDG_RUNTIME_DIR/$appname/$version``.
 
-        if output_file:
-            self.mkpath(os.path.dirname(output_file))
-
-        try:
-            self.spawn(pp_args)
-        except DistutilsExecError as msg:
-            raise CompileError(msg)
-
-    def _compile(self, obj, src, ext, cc_args, extra_postargs, pp_opts):
-        compiler_so = compiler_fixup(self.compiler_so, cc_args + extra_postargs)
-        compiler_so_cxx = compiler_fixup(self.compiler_so_cxx, cc_args + extra_postargs)
-        try:
-            if self.detect_language(src) == 'c++':
-                self.spawn(
-                    compiler_so_cxx + cc_args + [src, '-o', obj] + extra_postargs
-                )
+         For FreeBSD/OpenBSD/NetBSD, it would return ``/var/run/user/$(id -u)/$appname/$version`` if
+         exists, otherwise ``/tmp/runtime-$(id -u)/$appname/$version``, if``$XDG_RUNTIME_DIR``
+         is not set.
+        """
+        path = os.environ.get("XDG_RUNTIME_DIR", "")
+        if not path.strip():
+            if sys.platform.startswith(("freebsd", "openbsd", "netbsd")):
+                path = f"/var/run/user/{getuid()}"
+                if not Path(path).exists():
+                    path = f"/tmp/runtime-{getuid()}"  # noqa: S108
             else:
-                self.spawn(compiler_so + cc_args + [src, '-o', obj] + extra_postargs)
-        except DistutilsExecError as msg:
-            raise CompileError(msg)
+                path = f"/run/user/{getuid()}"
+        return self._append_app_name_and_version(path)
 
-    def create_static_lib(
-        self, objects, output_libname, output_dir=None, debug=False, target_lang=None
-    ):
-        objects, output_dir = self._fix_object_args(objects, output_dir)
-
-        output_filename = self.library_filename(output_libname, output_dir=output_dir)
-
-        if self._need_link(objects, output_filename):
-            self.mkpath(os.path.dirname(output_filename))
-            self.spawn(self.archiver + [output_filename] + objects + self.objects)
-
-            # Not many Unices required ranlib anymore -- SunOS 4.x is, I
-            # think the only major Unix that does.  Maybe we need some
-            # platform intelligence here to skip ranlib if it's not
-            # needed -- or maybe Python's configure script took care of
-            # it for us, hence the check for leading colon.
-            if self.ranlib:
-                try:
-                    self.spawn(self.ranlib + [output_filename])
-                except DistutilsExecError as msg:
-                    raise LibError(msg)
-        else:
-            log.debug("skipping %s (up-to-date)", output_filename)
-
-    def link(
-        self,
-        target_desc,
-        objects: list[str] | tuple[str, ...],
-        output_filename,
-        output_dir: str | None = None,
-        libraries: list[str] | tuple[str, ...] | None = None,
-        library_dirs: list[str] | tuple[str, ...] | None = None,
-        runtime_library_dirs: list[str] | tuple[str, ...] | None = None,
-        export_symbols=None,
-        debug=False,
-        extra_preargs=None,
-        extra_postargs=None,
-        build_temp=None,
-        target_lang=None,
-    ):
-        objects, output_dir = self._fix_object_args(objects, output_dir)
-        fixed_args = self._fix_lib_args(libraries, library_dirs, runtime_library_dirs)
-        libraries, library_dirs, runtime_library_dirs = fixed_args
-
-        lib_opts = gen_lib_options(self, library_dirs, runtime_library_dirs, libraries)
-        if not isinstance(output_dir, (str, type(None))):
-            raise TypeError("'output_dir' must be a string or None")
-        if output_dir is not None:
-            output_filename = os.path.join(output_dir, output_filename)
-
-        if self._need_link(objects, output_filename):
-            ld_args = objects + self.objects + lib_opts + ['-o', output_filename]
-            if debug:
-                ld_args[:0] = ['-g']
-            if extra_preargs:
-                ld_args[:0] = extra_preargs
-            if extra_postargs:
-                ld_args.extend(extra_postargs)
-            self.mkpath(os.path.dirname(output_filename))
-            try:
-                # Select a linker based on context: linker_exe when
-                # building an executable or linker_so (with shared options)
-                # when building a shared library.
-                building_exe = target_desc == base.Compiler.EXECUTABLE
-                target_cxx = target_lang == "c++"
-                linker = (
-                    (self.linker_exe_cxx if target_cxx else self.linker_exe)
-                    if building_exe
-                    else (self.linker_so_cxx if target_cxx else self.linker_so)
-                )[:]
-
-                if target_cxx and self.compiler_cxx:
-                    env, linker_ne = _split_env(linker)
-                    aix, linker_na = _split_aix(linker_ne)
-                    _, compiler_cxx_ne = _split_env(self.compiler_cxx)
-                    _, linker_exe_ne = _split_env(self.linker_exe_cxx)
-
-                    params = _linker_params(linker_na, linker_exe_ne)
-                    linker = env + aix + compiler_cxx_ne + params
-
-                linker = compiler_fixup(linker, ld_args)
-
-                self.spawn(linker + ld_args)
-            except DistutilsExecError as msg:
-                raise LinkError(msg)
-        else:
-            log.debug("skipping %s (up-to-date)", output_filename)
-
-    # -- Miscellaneous methods -----------------------------------------
-    # These are all used by the 'gen_lib_options() function, in
-    # ccompiler.py.
-
-    def library_dir_option(self, dir):
-        return "-L" + dir
-
-    def _is_gcc(self):
-        cc_var = sysconfig.get_config_var("CC")
-        compiler = os.path.basename(shlex.split(cc_var)[0])
-        return "gcc" in compiler or "g++" in compiler
-
-    def runtime_library_dir_option(self, dir: str) -> str | list[str]:  # type: ignore[override] # Fixed in pypa/distutils#339
-        # XXX Hackish, at the very least.  See Python bug #445902:
-        # https://bugs.python.org/issue445902
-        # Linkers on different platforms need different options to
-        # specify that directories need to be added to the list of
-        # directories searched for dependencies when a dynamic library
-        # is sought.  GCC on GNU systems (Linux, FreeBSD, ...) has to
-        # be told to pass the -R option through to the linker, whereas
-        # other compilers and gcc on other systems just know this.
-        # Other compilers may need something slightly different.  At
-        # this time, there's no way to determine this information from
-        # the configuration data stored in the Python installation, so
-        # we use this hack.
-        if sys.platform[:6] == "darwin":
-            from distutils.util import get_macosx_target_ver, split_version
-
-            macosx_target_ver = get_macosx_target_ver()
-            if macosx_target_ver and split_version(macosx_target_ver) >= [10, 5]:
-                return "-Wl,-rpath," + dir
-            else:  # no support for -rpath on earlier macOS versions
-                return "-L" + dir
-        elif sys.platform[:7] == "freebsd":
-            return "-Wl,-rpath=" + dir
-        elif sys.platform[:5] == "hp-ux":
-            return [
-                "-Wl,+s" if self._is_gcc() else "+s",
-                "-L" + dir,
-            ]
-
-        # For all compilers, `-Wl` is the presumed way to pass a
-        # compiler option to the linker
-        if sysconfig.get_config_var("GNULD") == "yes":
-            return consolidate_linker_args([
-                # Force RUNPATH instead of RPATH
-                "-Wl,--enable-new-dtags",
-                "-Wl,-rpath," + dir,
-            ])
-        else:
-            return "-Wl,-R" + dir
-
-    def library_option(self, lib):
-        return "-l" + lib
-
-    @staticmethod
-    def _library_root(dir):
+    @property
+    def site_runtime_dir(self) -> str:
         """
-        macOS users can specify an alternate SDK using'-isysroot'.
-        Calculate the SDK root if it is specified.
+        :return: runtime directory shared by users, e.g. ``/run/$appname/$version`` or \
+        ``$XDG_RUNTIME_DIR/$appname/$version``.
 
-        Note that, as of Xcode 7, Apple SDKs may contain textual stub
-        libraries with .tbd extensions rather than the normal .dylib
-        shared libraries installed in /.  The Apple compiler tool
-        chain handles this transparently but it can cause problems
-        for programs that are being built with an SDK and searching
-        for specific libraries.  Callers of find_library_file need to
-        keep in mind that the base filename of the returned SDK library
-        file might have a different extension from that of the library
-        file installed on the running system, for example:
-          /Applications/Xcode.app/Contents/Developer/Platforms/
-              MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk/
-              usr/lib/libedit.tbd
-        vs
-          /usr/lib/libedit.dylib
+        Note that this behaves almost exactly like `user_runtime_dir` if ``$XDG_RUNTIME_DIR`` is set, but will
+        fall back to paths associated to the root user instead of a regular logged-in user if it's not set.
+
+        If you wish to ensure that a logged-in root user path is returned e.g. ``/run/user/0``, use `user_runtime_dir`
+        instead.
+
+        For FreeBSD/OpenBSD/NetBSD, it would return ``/var/run/$appname/$version`` if ``$XDG_RUNTIME_DIR`` is not set.
         """
-        cflags = sysconfig.get_config_var('CFLAGS')
-        match = re.search(r'-isysroot\s*(\S+)', cflags)
+        path = os.environ.get("XDG_RUNTIME_DIR", "")
+        if not path.strip():
+            if sys.platform.startswith(("freebsd", "openbsd", "netbsd")):
+                path = "/var/run"
+            else:
+                path = "/run"
+        return self._append_app_name_and_version(path)
 
-        apply_root = (
-            sys.platform == 'darwin'
-            and match
-            and (
-                dir.startswith('/System/')
-                or (dir.startswith('/usr/') and not dir.startswith('/usr/local/'))
-            )
-        )
+    @property
+    def site_data_path(self) -> Path:
+        """:return: data path shared by users. Only return the first item, even if ``multipath`` is set to ``True``"""
+        return self._first_item_as_path_if_multipath(self.site_data_dir)
 
-        return os.path.join(match.group(1), dir[1:]) if apply_root else dir
+    @property
+    def site_config_path(self) -> Path:
+        """:return: config path shared by the users, returns the first item, even if ``multipath`` is set to ``True``"""
+        return self._first_item_as_path_if_multipath(self.site_config_dir)
 
-    def find_library_file(self, dirs, lib, debug=False):
-        """
-        Second-guess the linker with not much hard
-        data to go on: GCC seems to prefer the shared library, so
-        assume that *all* Unix C compilers do,
-        ignoring even GCC's "-static" option.
-        """
-        lib_names = (
-            self.library_filename(lib, lib_type=type)
-            for type in 'dylib xcode_stub shared static'.split()
-        )
+    @property
+    def site_cache_path(self) -> Path:
+        """:return: cache path shared by users. Only return the first item, even if ``multipath`` is set to ``True``"""
+        return self._first_item_as_path_if_multipath(self.site_cache_dir)
 
-        roots = map(self._library_root, dirs)
+    def iter_config_dirs(self) -> Iterator[str]:
+        """:yield: all user and site configuration directories."""
+        yield self.user_config_dir
+        yield from self._site_config_dirs
 
-        searched = itertools.starmap(os.path.join, itertools.product(roots, lib_names))
+    def iter_data_dirs(self) -> Iterator[str]:
+        """:yield: all user and site data directories."""
+        yield self.user_data_dir
+        yield from self._site_data_dirs
 
-        found = filter(os.path.exists, searched)
 
-        # Return None if it could not be found in any dir.
-        return next(found, None)
+def _get_user_media_dir(env_var: str, fallback_tilde_path: str) -> str:
+    media_dir = _get_user_dirs_folder(env_var)
+    if media_dir is None:
+        media_dir = os.environ.get(env_var, "").strip()
+        if not media_dir:
+            media_dir = os.path.expanduser(fallback_tilde_path)  # noqa: PTH111
+
+    return media_dir
+
+
+def _get_user_dirs_folder(key: str) -> str | None:
+    """
+    Return directory from user-dirs.dirs config file.
+
+    See https://freedesktop.org/wiki/Software/xdg-user-dirs/.
+
+    """
+    user_dirs_config_path = Path(Unix().user_config_dir) / "user-dirs.dirs"
+    if user_dirs_config_path.exists():
+        parser = ConfigParser()
+
+        with user_dirs_config_path.open() as stream:
+            # Add fake section header, so ConfigParser doesn't complain
+            parser.read_string(f"[top]\n{stream.read()}")
+
+        if key not in parser["top"]:
+            return None
+
+        path = parser["top"][key].strip('"')
+        # Handle relative home paths
+        return path.replace("$HOME", os.path.expanduser("~"))  # noqa: PTH111
+
+    return None
+
+
+__all__ = [
+    "Unix",
+]

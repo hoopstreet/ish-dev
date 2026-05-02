@@ -18,6 +18,6 @@ sys.path = original_sys_path
 
 # Second, add lib directories.
 # ensuring .pth file are processed.
-for path in ['/tmp/pip-build-env-kxrunt6l/overlay/lib/python3.9/site-packages', '/tmp/pip-build-env-kxrunt6l/normal/lib/python3.9/site-packages']:
+for path in ['/tmp/pip-build-env-7x5nnk82/overlay/lib/python3.9/site-packages', '/tmp/pip-build-env-7x5nnk82/normal/lib/python3.9/site-packages']:
     assert not path in sys.path
     site.addsitedir(path)

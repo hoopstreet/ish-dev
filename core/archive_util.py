@@ -1,284 +1,219 @@
-"""distutils.archive_util
+"""Utilities for extracting common archive formats"""
 
-Utility functions for creating archive files (tarballs, zip files,
-that sort of thing)."""
-
-from __future__ import annotations
-
+import contextlib
 import os
-from typing import Literal, overload
+import posixpath
+import shutil
+import tarfile
+import zipfile
 
-try:
-    import zipfile
-except ImportError:
-    zipfile = None
+from ._path import ensure_directory
 
+from distutils.errors import DistutilsError
 
-from ._log import log
-from .dir_util import mkpath
-from .errors import DistutilsExecError
-from .spawn import spawn
-
-try:
-    from pwd import getpwnam
-except ImportError:
-    getpwnam = None
-
-try:
-    from grp import getgrnam
-except ImportError:
-    getgrnam = None
+__all__ = [
+    "unpack_archive",
+    "unpack_zipfile",
+    "unpack_tarfile",
+    "default_filter",
+    "UnrecognizedFormat",
+    "extraction_drivers",
+    "unpack_directory",
+]
 
 
-def _get_gid(name):
-    """Returns a gid, given a group name."""
-    if getgrnam is None or name is None:
-        return None
-    try:
-        result = getgrnam(name)
-    except KeyError:
-        result = None
-    if result is not None:
-        return result[2]
-    return None
+class UnrecognizedFormat(DistutilsError):
+    """Couldn't recognize the archive type"""
 
 
-def _get_uid(name):
-    """Returns an uid, given a user name."""
-    if getpwnam is None or name is None:
-        return None
-    try:
-        result = getpwnam(name)
-    except KeyError:
-        result = None
-    if result is not None:
-        return result[2]
-    return None
+def default_filter(src, dst):
+    """The default progress/filter callback; returns True for all files"""
+    return dst
 
 
-def make_tarball(
-    base_name: str,
-    base_dir: str | os.PathLike[str],
-    compress: Literal["gzip", "bzip2", "xz"] | None = "gzip",
-    verbose: bool = False,
-    owner: str | None = None,
-    group: str | None = None,
-) -> str:
-    """Create a (possibly compressed) tar file from all the files under
-    'base_dir'.
+def unpack_archive(
+    filename, extract_dir, progress_filter=default_filter, drivers=None
+) -> None:
+    """Unpack `filename` to `extract_dir`, or raise ``UnrecognizedFormat``
 
-    'compress' must be "gzip" (the default), "bzip2", "xz", or None.
+    `progress_filter` is a function taking two arguments: a source path
+    internal to the archive ('/'-separated), and a filesystem path where it
+    will be extracted.  The callback must return the desired extract path
+    (which may be the same as the one passed in), or else ``None`` to skip
+    that file or directory.  The callback can thus be used to report on the
+    progress of the extraction, as well as to filter the items extracted or
+    alter their extraction paths.
 
-    'owner' and 'group' can be used to define an owner and a group for the
-    archive that is being built. If not provided, the current owner and group
-    will be used.
-
-    The output tar file will be named 'base_dir' +  ".tar", possibly plus
-    the appropriate compression extension (".gz", ".bz2", ".xz" or ".Z").
-
-    Returns the output filename.
+    `drivers`, if supplied, must be a non-empty sequence of functions with the
+    same signature as this function (minus the `drivers` argument), that raise
+    ``UnrecognizedFormat`` if they do not support extracting the designated
+    archive type.  The `drivers` are tried in sequence until one is found that
+    does not raise an error, or until all are exhausted (in which case
+    ``UnrecognizedFormat`` is raised).  If you do not supply a sequence of
+    drivers, the module's ``extraction_drivers`` constant will be used, which
+    means that ``unpack_zipfile`` and ``unpack_tarfile`` will be tried, in that
+    order.
     """
-    tar_compression = {
-        'gzip': 'gz',
-        'bzip2': 'bz2',
-        'xz': 'xz',
-        None: '',
-    }
-    compress_ext = {'gzip': '.gz', 'bzip2': '.bz2', 'xz': '.xz'}
-
-    # flags for compression program, each element of list will be an argument
-    if compress is not None and compress not in compress_ext.keys():
-        raise ValueError(
-            "bad value for 'compress': must be None, 'gzip', 'bzip2', 'xz'"
-        )
-
-    archive_name = base_name + '.tar'
-    archive_name += compress_ext.get(compress, '')
-
-    mkpath(os.path.dirname(archive_name))
-
-    # creating the tarball
-    import tarfile  # late import so Python build itself doesn't break
-
-    log.info('Creating tar archive')
-
-    uid = _get_uid(owner)
-    gid = _get_gid(group)
-
-    def _set_uid_gid(tarinfo):
-        if gid is not None:
-            tarinfo.gid = gid
-            tarinfo.gname = group
-        if uid is not None:
-            tarinfo.uid = uid
-            tarinfo.uname = owner
-        return tarinfo
-
-    tar = tarfile.open(archive_name, f'w|{tar_compression[compress]}')
-    try:
-        tar.add(base_dir, filter=_set_uid_gid)
-    finally:
-        tar.close()
-
-    return archive_name
-
-
-def make_zipfile(
-    base_name: str,
-    base_dir: str | os.PathLike[str],
-    verbose: bool = False,
-) -> str:
-    """Create a zip file from all the files under 'base_dir'.
-
-    The output zip file will be named 'base_name' + ".zip".  Uses either the
-    "zipfile" Python module (if available) or the InfoZIP "zip" utility
-    (if installed and found on the default search path).  If neither tool is
-    available, raises DistutilsExecError.  Returns the name of the output zip
-    file.
-    """
-    zip_filename = base_name + ".zip"
-    mkpath(os.path.dirname(zip_filename))
-
-    # If zipfile module is not available, try spawning an external
-    # 'zip' command.
-    if zipfile is None:
-        if verbose:
-            zipoptions = "-r"
+    for driver in drivers or extraction_drivers:
+        try:
+            driver(filename, extract_dir, progress_filter)
+        except UnrecognizedFormat:
+            continue
         else:
-            zipoptions = "-rq"
-
-        try:
-            spawn(["zip", zipoptions, zip_filename, base_dir])
-        except DistutilsExecError:
-            # XXX really should distinguish between "couldn't find
-            # external 'zip' command" and "zip failed".
-            raise DistutilsExecError(
-                f"unable to create zip file '{zip_filename}': "
-                "could neither import the 'zipfile' module nor "
-                "find a standalone zip utility"
-            )
-
+            return
     else:
-        log.info("creating '%s' and adding '%s' to it", zip_filename, base_dir)
+        raise UnrecognizedFormat(f"Not a recognized archive type: {filename}")
 
+
+def unpack_directory(filename, extract_dir, progress_filter=default_filter) -> None:
+    """ "Unpack" a directory, using the same interface as for archives
+
+    Raises ``UnrecognizedFormat`` if `filename` is not a directory
+    """
+    if not os.path.isdir(filename):
+        raise UnrecognizedFormat(f"{filename} is not a directory")
+
+    paths = {
+        filename: ('', extract_dir),
+    }
+    for base, dirs, files in os.walk(filename):
+        src, dst = paths[base]
+        for d in dirs:
+            paths[os.path.join(base, d)] = src + d + '/', os.path.join(dst, d)
+        for f in files:
+            target = os.path.join(dst, f)
+            target = progress_filter(src + f, target)
+            if not target:
+                # skip non-files
+                continue
+            ensure_directory(target)
+            f = os.path.join(base, f)
+            shutil.copyfile(f, target)
+            shutil.copystat(f, target)
+
+
+def unpack_zipfile(filename, extract_dir, progress_filter=default_filter) -> None:
+    """Unpack zip `filename` to `extract_dir`
+
+    Raises ``UnrecognizedFormat`` if `filename` is not a zipfile (as determined
+    by ``zipfile.is_zipfile()``).  See ``unpack_archive()`` for an explanation
+    of the `progress_filter` argument.
+    """
+
+    if not zipfile.is_zipfile(filename):
+        raise UnrecognizedFormat(f"{filename} is not a zip file")
+
+    with zipfile.ZipFile(filename) as z:
+        _unpack_zipfile_obj(z, extract_dir, progress_filter)
+
+
+def _unpack_zipfile_obj(zipfile_obj, extract_dir, progress_filter=default_filter):
+    """Internal/private API used by other parts of setuptools.
+    Similar to ``unpack_zipfile``, but receives an already opened :obj:`zipfile.ZipFile`
+    object instead of a filename.
+    """
+    for info in zipfile_obj.infolist():
+        name = info.filename
+
+        # don't extract absolute paths or ones with .. in them
+        if name.startswith('/') or '..' in name.split('/'):
+            continue
+
+        target = os.path.join(extract_dir, *name.split('/'))
+        target = progress_filter(name, target)
+        if not target:
+            continue
+        if name.endswith('/'):
+            # directory
+            ensure_directory(target)
+        else:
+            # file
+            ensure_directory(target)
+            data = zipfile_obj.read(info.filename)
+            with open(target, 'wb') as f:
+                f.write(data)
+        unix_attributes = info.external_attr >> 16
+        if unix_attributes:
+            os.chmod(target, unix_attributes)
+
+
+def _resolve_tar_file_or_dir(tar_obj, tar_member_obj):
+    """Resolve any links and extract link targets as normal files."""
+    while tar_member_obj is not None and (
+        tar_member_obj.islnk() or tar_member_obj.issym()
+    ):
+        linkpath = tar_member_obj.linkname
+        if tar_member_obj.issym():
+            base = posixpath.dirname(tar_member_obj.name)
+            linkpath = posixpath.join(base, linkpath)
+            linkpath = posixpath.normpath(linkpath)
+        tar_member_obj = tar_obj._getmember(linkpath)
+
+    is_file_or_dir = tar_member_obj is not None and (
+        tar_member_obj.isfile() or tar_member_obj.isdir()
+    )
+    if is_file_or_dir:
+        return tar_member_obj
+
+    raise LookupError('Got unknown file type')
+
+
+def _iter_open_tar(tar_obj, extract_dir, progress_filter):
+    """Emit member-destination pairs from a tar archive."""
+    # don't do any chowning!
+    tar_obj.chown = lambda *args: None
+
+    with contextlib.closing(tar_obj):
+        for member in tar_obj:
+            name = member.name
+            # don't extract absolute paths or ones with .. in them
+            if name.startswith('/') or '..' in name.split('/'):
+                continue
+
+            prelim_dst = os.path.join(extract_dir, *name.split('/'))
+
+            try:
+                member = _resolve_tar_file_or_dir(tar_obj, member)
+            except LookupError:
+                continue
+
+            final_dst = progress_filter(name, prelim_dst)
+            if not final_dst:
+                continue
+
+            if final_dst.endswith(os.sep):
+                final_dst = final_dst[:-1]
+
+            yield member, final_dst
+
+
+def unpack_tarfile(filename, extract_dir, progress_filter=default_filter) -> bool:
+    """Unpack tar/tar.gz/tar.bz2 `filename` to `extract_dir`
+
+    Raises ``UnrecognizedFormat`` if `filename` is not a tarfile (as determined
+    by ``tarfile.open()``).  See ``unpack_archive()`` for an explanation
+    of the `progress_filter` argument.
+    """
+    try:
+        tarobj = tarfile.open(filename)
+    except tarfile.TarError as e:
+        raise UnrecognizedFormat(
+            f"{filename} is not a compressed or uncompressed tar file"
+        ) from e
+
+    for member, final_dst in _iter_open_tar(
+        tarobj,
+        extract_dir,
+        progress_filter,
+    ):
         try:
-            zip = zipfile.ZipFile(zip_filename, "w", compression=zipfile.ZIP_DEFLATED)
-        except RuntimeError:
-            zip = zipfile.ZipFile(zip_filename, "w", compression=zipfile.ZIP_STORED)
+            # XXX Ugh
+            tarobj._extract_member(member, final_dst)
+        except tarfile.ExtractError:
+            # chown/chmod/mkfifo/mknode/makedev failed
+            pass
 
-        with zip:
-            if base_dir != os.curdir:
-                path = os.path.normpath(os.path.join(base_dir, ''))
-                zip.write(path, path)
-                log.info("adding '%s'", path)
-            for dirpath, dirnames, filenames in os.walk(base_dir):
-                for name in dirnames:
-                    path = os.path.normpath(os.path.join(dirpath, name, ''))
-                    zip.write(path, path)
-                    log.info("adding '%s'", path)
-                for name in filenames:
-                    path = os.path.normpath(os.path.join(dirpath, name))
-                    if os.path.isfile(path):
-                        zip.write(path, path)
-                        log.info("adding '%s'", path)
-
-    return zip_filename
+    return True
 
 
-ARCHIVE_FORMATS = {
-    'gztar': (make_tarball, [('compress', 'gzip')], "gzip'ed tar-file"),
-    'bztar': (make_tarball, [('compress', 'bzip2')], "bzip2'ed tar-file"),
-    'xztar': (make_tarball, [('compress', 'xz')], "xz'ed tar-file"),
-    'ztar': (make_tarball, [('compress', 'compress')], "compressed tar file"),
-    'tar': (make_tarball, [('compress', None)], "uncompressed tar file"),
-    'zip': (make_zipfile, [], "ZIP file"),
-}
-
-
-def check_archive_formats(formats):
-    """Returns the first format from the 'format' list that is unknown.
-
-    If all formats are known, returns None
-    """
-    for format in formats:
-        if format not in ARCHIVE_FORMATS:
-            return format
-    return None
-
-
-@overload
-def make_archive(
-    base_name: str,
-    format: str,
-    root_dir: str | os.PathLike[str] | bytes | os.PathLike[bytes] | None = None,
-    base_dir: str | None = None,
-    verbose: bool = False,
-    owner: str | None = None,
-    group: str | None = None,
-) -> str: ...
-@overload
-def make_archive(
-    base_name: str | os.PathLike[str],
-    format: str,
-    root_dir: str | os.PathLike[str] | bytes | os.PathLike[bytes],
-    base_dir: str | None = None,
-    verbose: bool = False,
-    owner: str | None = None,
-    group: str | None = None,
-) -> str: ...
-def make_archive(
-    base_name: str | os.PathLike[str],
-    format: str,
-    root_dir: str | os.PathLike[str] | bytes | os.PathLike[bytes] | None = None,
-    base_dir: str | None = None,
-    verbose: bool = False,
-    owner: str | None = None,
-    group: str | None = None,
-) -> str:
-    """Create an archive file (eg. zip or tar).
-
-    'base_name' is the name of the file to create, minus any format-specific
-    extension; 'format' is the archive format: one of "zip", "tar", "gztar",
-    "bztar", "xztar", or "ztar".
-
-    'root_dir' is a directory that will be the root directory of the
-    archive; ie. we typically chdir into 'root_dir' before creating the
-    archive.  'base_dir' is the directory where we start archiving from;
-    ie. 'base_dir' will be the common prefix of all files and
-    directories in the archive.  'root_dir' and 'base_dir' both default
-    to the current directory.  Returns the name of the archive file.
-
-    'owner' and 'group' are used when creating a tar archive. By default,
-    uses the current owner and group.
-    """
-    save_cwd = os.getcwd()
-    if root_dir is not None:
-        log.debug("changing into '%s'", root_dir)
-        base_name = os.path.abspath(base_name)
-        os.chdir(root_dir)
-
-    if base_dir is None:
-        base_dir = os.curdir
-
-    kwargs: dict[str, bool | None] = {}
-
-    try:
-        format_info = ARCHIVE_FORMATS[format]
-    except KeyError:
-        raise ValueError(f"unknown archive format '{format}'")
-
-    func = format_info[0]
-    kwargs.update(format_info[1])
-
-    if format != 'zip':
-        kwargs['owner'] = owner
-        kwargs['group'] = group
-
-    try:
-        filename = func(base_name, base_dir, **kwargs)
-    finally:
-        if root_dir is not None:
-            log.debug("changing back to '%s'", save_cwd)
-            os.chdir(save_cwd)
-
-    return filename
+extraction_drivers = unpack_directory, unpack_zipfile, unpack_tarfile

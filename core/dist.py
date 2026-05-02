@@ -1,396 +1,561 @@
-"""distutils.dist
-
-Provides the Distribution class, which represents the module distribution
-being built/installed/distributed.
-"""
-
 from __future__ import annotations
 
-import contextlib
-import logging
+import functools
+import io
+import itertools
+import numbers
 import os
-import pathlib
 import re
 import sys
-import warnings
-from collections.abc import Iterable, MutableMapping
-from email import message_from_file
-from typing import (
-    IO,
-    TYPE_CHECKING,
-    Any,
-    ClassVar,
-    Literal,
-    TypeVar,
-    Union,
-    overload,
-)
+from collections.abc import Iterable, Iterator, MutableMapping, Sequence
+from glob import glob
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Union
 
-from packaging.utils import canonicalize_name, canonicalize_version
+from more_itertools import partition, unique_everseen
+from packaging.markers import InvalidMarker, Marker
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import Version
 
-from ._log import log
-from .debug import DEBUG
-from .errors import (
-    DistutilsArgError,
-    DistutilsClassError,
-    DistutilsModuleError,
-    DistutilsOptionError,
+from . import (
+    _entry_points,
+    _reqs,
+    _static,
+    command as _,  # noqa: F401 # imported for side-effects
 )
-from .fancy_getopt import FancyGetopt, translate_longopt
-from .util import check_environ, rfc822_escape, strtobool
+from ._importlib import metadata
+from ._normalization import _canonicalize_license_expression
+from ._path import StrPath
+from ._reqs import _StrOrIter
+from .config import pyprojecttoml, setupcfg
+from .discovery import ConfigDiscovery
+from .errors import InvalidConfigError
+from .monkey import get_unpatched
+from .warnings import InformationOnly, SetuptoolsDeprecationWarning
+
+import distutils.cmd
+import distutils.command
+import distutils.core
+import distutils.dist
+import distutils.log
+from distutils.debug import DEBUG
+from distutils.errors import DistutilsOptionError, DistutilsSetupError
+from distutils.fancy_getopt import translate_longopt
+from distutils.util import strtobool
 
 if TYPE_CHECKING:
-    from _typeshed import SupportsWrite
     from typing_extensions import TypeAlias
 
-    # type-only import because of mutual dependence between these modules
-    from .cmd import Command
 
-_CommandT = TypeVar("_CommandT", bound="Command")
-_OptionsList: TypeAlias = list[
-    Union[tuple[str, Union[str, None], str, int], tuple[str, Union[str, None], str]]
-]
+__all__ = ['Distribution']
 
+_sequence = tuple, list
+"""
+:meta private:
 
-# Regex to define acceptable Distutils command names.  This is not *quite*
-# the same as a Python NAME -- I don't allow leading underscores.  The fact
-# that they're very similar is no coincidence; the default naming scheme is
-# to look for a Python module named after the command.
-command_re = re.compile(r'^[a-zA-Z]([a-zA-Z0-9_]*)$')
-
-
-def _ensure_list(value: str | Iterable[str], fieldname) -> str | list[str]:
-    if isinstance(value, str):
-        # a string containing comma separated values is okay.  It will
-        # be converted to a list by Distribution.finalize_options().
-        pass
-    elif not isinstance(value, list):
-        # passing a tuple or an iterator perhaps, warn and convert
-        typename = type(value).__name__
-        msg = "Warning: '{fieldname}' should be a list, got type '{typename}'"
-        msg = msg.format(**locals())
-        log.warning(msg)
-        value = list(value)
-    return value
-
-
-class Distribution:
-    """The core of the Distutils.  Most of the work hiding behind 'setup'
-    is really done within a Distribution instance, which farms the work out
-    to the Distutils commands specified on the command line.
-
-    Setup scripts will almost never instantiate Distribution directly,
-    unless the 'setup()' function is totally inadequate to their needs.
-    However, it is conceivable that a setup script might wish to subclass
-    Distribution for some specialized purpose, and then pass the subclass
-    to 'setup()' as the 'distclass' keyword argument.  If so, it is
-    necessary to respect the expectations that 'setup' has of Distribution.
-    See the code for 'setup()', in core.py, for details.
-    """
-
-    # 'global_options' describes the command-line options that may be
-    # supplied to the setup script prior to any actual commands.
-    # Eg. "./setup.py -n" or "./setup.py --quiet" both take advantage of
-    # these global options.  This list should be kept to a bare minimum,
-    # since every global option is also valid as a command option -- and we
-    # don't want to pollute the commands with too many options that they
-    # have minimal control over.
-    # The fourth entry for verbose means that it can be repeated.
-    global_options: ClassVar[_OptionsList] = [
-        ('verbose', 'v', "run verbosely (default)", 1),
-        ('quiet', 'q', "run quietly (turns verbosity off)"),
-        ('help', 'h', "show detailed help message"),
-        ('no-user-cfg', None, 'ignore pydistutils.cfg in your home directory'),
-    ]
-
-    # 'common_usage' is a short (2-3 line) string describing the common
-    # usage of the setup script.
-    common_usage: ClassVar[str] = """\
-Common commands: (see '--help-commands' for more)
-
-  setup.py build      will build the package underneath 'build/'
-  setup.py install    will install the package
+Supported iterable types that are known to be:
+- ordered (which `set` isn't)
+- not match a str (which `Sequence[str]` does)
+- not imply a nested type (like `dict`)
+for use with `isinstance`.
+"""
+_Sequence: TypeAlias = Union[tuple[str, ...], list[str]]
+# This is how stringifying _Sequence would look in Python 3.10
+_sequence_type_repr = "tuple[str, ...] | list[str]"
+_OrderedStrSequence: TypeAlias = Union[str, dict[str, Any], Sequence[str]]
+"""
+:meta private:
+Avoid single-use iterable. Disallow sets.
+A poor approximation of an OrderedSequence (dict doesn't match a Sequence).
 """
 
-    # options that are not propagated to the commands
-    display_options: ClassVar[_OptionsList] = [
-        ('help-commands', None, "list all available commands"),
-        ('name', None, "print package name"),
-        ('version', 'V', "print package version"),
-        ('fullname', None, "print <package name>-<version>"),
-        ('author', None, "print the author's name"),
-        ('author-email', None, "print the author's email address"),
-        ('maintainer', None, "print the maintainer's name"),
-        ('maintainer-email', None, "print the maintainer's email address"),
-        ('contact', None, "print the maintainer's name if known, else the author's"),
-        (
-            'contact-email',
-            None,
-            "print the maintainer's email address if known, else the author's",
-        ),
-        ('url', None, "print the URL for this package"),
-        ('license', None, "print the license of the package"),
-        ('licence', None, "alias for --license"),
-        ('description', None, "print the package description"),
-        ('long-description', None, "print the long package description"),
-        ('platforms', None, "print the list of platforms"),
-        ('classifiers', None, "print the list of classifiers"),
-        ('keywords', None, "print the list of keywords"),
-        ('provides', None, "print the list of packages/modules provided"),
-        ('requires', None, "print the list of packages/modules required"),
-        ('obsoletes', None, "print the list of packages/modules made obsolete"),
-    ]
-    display_option_names: ClassVar[list[str]] = [
-        translate_longopt(x[0]) for x in display_options
-    ]
 
-    # negative options are options that exclude other options
-    negative_opt: ClassVar[dict[str, str]] = {'quiet': 'verbose'}
+def __getattr__(name: str) -> Any:  # pragma: no cover
+    if name == "sequence":
+        SetuptoolsDeprecationWarning.emit(
+            "`setuptools.dist.sequence` is an internal implementation detail.",
+            "Please define your own `sequence = tuple, list` instead.",
+            due_date=(2025, 8, 28),  # Originally added on 2024-08-27
+        )
+        return _sequence
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    # -- Creation/initialization methods -------------------------------
 
-    # Can't Unpack a TypedDict with optional properties, so using Any instead
-    def __init__(self, attrs: MutableMapping[str, Any] | None = None) -> None:  # noqa: C901
-        """Construct a new Distribution instance: initialize all the
-        attributes of a Distribution, and then use 'attrs' (a dictionary
-        mapping attribute names to values) to assign some of those
-        attributes their "real" values.  (Any attributes not mentioned in
-        'attrs' will be assigned to some null value: 0, None, an empty list
-        or dictionary, etc.)  Most importantly, initialize the
-        'command_obj' attribute to the empty dictionary; this will be
-        filled in with real command objects by 'parse_command_line()'.
-        """
+def check_importable(dist, attr, value):
+    try:
+        ep = metadata.EntryPoint(value=value, name=None, group=None)
+        assert not ep.extras
+    except (TypeError, ValueError, AttributeError, AssertionError) as e:
+        raise DistutilsSetupError(
+            f"{attr!r} must be importable 'module:attrs' string (got {value!r})"
+        ) from e
 
-        # Default values for our command-line options
-        self.verbose = True
-        self.help = False
-        for attr in self.display_option_names:
-            setattr(self, attr, False)
 
-        # Store the distribution meta-data (name, version, author, and so
-        # forth) in a separate object -- we're getting to have enough
-        # information here (and enough command-line options) that it's
-        # worth it.  Also delegate 'get_XXX()' methods to the 'metadata'
-        # object in a sneaky and underhanded (but efficient!) way.
-        self.metadata = DistributionMetadata()
-        for basename in self.metadata._METHOD_BASENAMES:
-            method_name = "get_" + basename
-            setattr(self, method_name, getattr(self.metadata, method_name))
+def assert_string_list(dist, attr: str, value: _Sequence) -> None:
+    """Verify that value is a string list"""
+    try:
+        # verify that value is a list or tuple to exclude unordered
+        # or single-use iterables
+        assert isinstance(value, _sequence)
+        # verify that elements of value are strings
+        assert ''.join(value) != value
+    except (TypeError, ValueError, AttributeError, AssertionError) as e:
+        raise DistutilsSetupError(
+            f"{attr!r} must be of type <{_sequence_type_repr}> (got {value!r})"
+        ) from e
 
-        # 'cmdclass' maps command names to class objects, so we
-        # can 1) quickly figure out which class to instantiate when
-        # we need to create a new command object, and 2) have a way
-        # for the setup script to override command classes
-        self.cmdclass: dict[str, type[Command]] = {}
 
-        # 'command_packages' is a list of packages in which commands
-        # are searched for.  The factory for command 'foo' is expected
-        # to be named 'foo' in the module 'foo' in one of the packages
-        # named here.  This list is searched from the left; an error
-        # is raised if no named package provides the command being
-        # searched for.  (Always access using get_command_packages().)
-        self.command_packages: str | list[str] | None = None
+def check_nsp(dist, attr, value):
+    """Verify that namespace packages are valid"""
+    ns_packages = value
+    assert_string_list(dist, attr, ns_packages)
+    for nsp in ns_packages:
+        if not dist.has_contents_for(nsp):
+            raise DistutilsSetupError(
+                f"Distribution contains no modules or packages for namespace package {nsp!r}"
+            )
+        parent, _sep, _child = nsp.rpartition('.')
+        if parent and parent not in ns_packages:
+            distutils.log.warn(
+                "WARNING: %r is declared as a package namespace, but %r"
+                " is not: please correct this in setup.py",
+                nsp,
+                parent,
+            )
+        SetuptoolsDeprecationWarning.emit(
+            "The namespace_packages parameter is deprecated.",
+            "Please replace its usage with implicit namespaces (PEP 420).",
+            see_docs="references/keywords.html#keyword-namespace-packages",
+            # TODO: define due_date, it may break old packages that are no longer
+            # maintained (e.g. sphinxcontrib extensions) when installed from source.
+            # Warning officially introduced in May 2022, however the deprecation
+            # was mentioned much earlier in the docs (May 2020, see #2149).
+        )
 
-        # 'script_name' and 'script_args' are usually set to sys.argv[0]
-        # and sys.argv[1:], but they can be overridden when the caller is
-        # not necessarily a setup script run from the command-line.
-        self.script_name: str | os.PathLike[str] | None = None
-        self.script_args: list[str] | None = None
 
-        # 'command_options' is where we store command options between
-        # parsing them (from config files, the command-line, etc.) and when
-        # they are actually needed -- ie. when the command in question is
-        # instantiated.  It is a dictionary of dictionaries of 2-tuples:
-        #   command_options = { command_name : { option : (source, value) } }
-        self.command_options: dict[str, dict[str, tuple[str, str]]] = {}
+def check_extras(dist, attr, value):
+    """Verify that extras_require mapping is valid"""
+    try:
+        list(itertools.starmap(_check_extra, value.items()))
+    except (TypeError, ValueError, AttributeError) as e:
+        raise DistutilsSetupError(
+            "'extras_require' must be a dictionary whose values are "
+            "strings or lists of strings containing valid project/version "
+            "requirement specifiers."
+        ) from e
 
-        # 'dist_files' is the list of (command, pyversion, file) that
-        # have been created by any dist commands run so far. This is
-        # filled regardless of whether the run is dry or not. pyversion
-        # gives sysconfig.get_python_version() if the dist file is
-        # specific to a Python version, 'any' if it is good for all
-        # Python versions on the target platform, and '' for a source
-        # file. pyversion should not be used to specify minimum or
-        # maximum required Python versions; use the metainfo for that
-        # instead.
+
+def _check_extra(extra, reqs):
+    _name, _sep, marker = extra.partition(':')
+    try:
+        _check_marker(marker)
+    except InvalidMarker:
+        msg = f"Invalid environment marker: {marker} ({extra!r})"
+        raise DistutilsSetupError(msg) from None
+    list(_reqs.parse(reqs))
+
+
+def _check_marker(marker):
+    if not marker:
+        return
+    m = Marker(marker)
+    m.evaluate()
+
+
+def assert_bool(dist, attr, value):
+    """Verify that value is True, False, 0, or 1"""
+    if bool(value) != value:
+        raise DistutilsSetupError(f"{attr!r} must be a boolean value (got {value!r})")
+
+
+def invalid_unless_false(dist, attr, value):
+    if not value:
+        DistDeprecationWarning.emit(f"{attr} is ignored.")
+        # TODO: should there be a `due_date` here?
+        return
+    raise DistutilsSetupError(f"{attr} is invalid.")
+
+
+def check_requirements(dist, attr: str, value: _OrderedStrSequence) -> None:
+    """Verify that install_requires is a valid requirements list"""
+    try:
+        list(_reqs.parse(value))
+        if isinstance(value, set):
+            raise TypeError("Unordered types are not allowed")
+    except (TypeError, ValueError) as error:
+        msg = (
+            f"{attr!r} must be a string or iterable of strings "
+            f"containing valid project/version requirement specifiers; {error}"
+        )
+        raise DistutilsSetupError(msg) from error
+
+
+def check_specifier(dist, attr, value):
+    """Verify that value is a valid version specifier"""
+    try:
+        SpecifierSet(value)
+    except (InvalidSpecifier, AttributeError) as error:
+        msg = f"{attr!r} must be a string containing valid version specifiers; {error}"
+        raise DistutilsSetupError(msg) from error
+
+
+def check_entry_points(dist, attr, value):
+    """Verify that entry_points map is parseable"""
+    try:
+        _entry_points.load(value)
+    except Exception as e:
+        raise DistutilsSetupError(e) from e
+
+
+def check_package_data(dist, attr, value):
+    """Verify that value is a dictionary of package names to glob lists"""
+    if not isinstance(value, dict):
+        raise DistutilsSetupError(
+            f"{attr!r} must be a dictionary mapping package names to lists of "
+            "string wildcard patterns"
+        )
+    for k, v in value.items():
+        if not isinstance(k, str):
+            raise DistutilsSetupError(
+                f"keys of {attr!r} dict must be strings (got {k!r})"
+            )
+        assert_string_list(dist, f'values of {attr!r} dict', v)
+
+
+def check_packages(dist, attr, value):
+    for pkgname in value:
+        if not re.match(r'\w+(\.\w+)*', pkgname):
+            distutils.log.warn(
+                "WARNING: %r not a valid package name; please use only "
+                ".-separated package names in setup.py",
+                pkgname,
+            )
+
+
+if TYPE_CHECKING:
+    # Work around a mypy issue where type[T] can't be used as a base: https://github.com/python/mypy/issues/10962
+    from distutils.core import Distribution as _Distribution
+else:
+    _Distribution = get_unpatched(distutils.core.Distribution)
+
+
+class Distribution(_Distribution):
+    """Distribution with support for tests and package data
+
+    This is an enhanced version of 'distutils.dist.Distribution' that
+    effectively adds the following new optional keyword arguments to 'setup()':
+
+     'install_requires' -- a string or sequence of strings specifying project
+        versions that the distribution requires when installed, in the format
+        used by 'pkg_resources.require()'.  They will be installed
+        automatically when the package is installed.  If you wish to use
+        packages that are not available in PyPI, or want to give your users an
+        alternate download location, you can add a 'find_links' option to the
+        '[easy_install]' section of your project's 'setup.cfg' file, and then
+        setuptools will scan the listed web pages for links that satisfy the
+        requirements.
+
+     'extras_require' -- a dictionary mapping names of optional "extras" to the
+        additional requirement(s) that using those extras incurs. For example,
+        this::
+
+            extras_require = dict(reST = ["docutils>=0.3", "reSTedit"])
+
+        indicates that the distribution can optionally provide an extra
+        capability called "reST", but it can only be used if docutils and
+        reSTedit are installed.  If the user installs your package using
+        EasyInstall and requests one of your extras, the corresponding
+        additional requirements will be installed if needed.
+
+     'package_data' -- a dictionary mapping package names to lists of filenames
+        or globs to use to find data files contained in the named packages.
+        If the dictionary has filenames or globs listed under '""' (the empty
+        string), those names will be searched for in every package, in addition
+        to any names for the specific package.  Data files found using these
+        names/globs will be installed along with the package, in the same
+        location as the package.  Note that globs are allowed to reference
+        the contents of non-package subdirectories, as long as you use '/' as
+        a path separator.  (Globs are automatically converted to
+        platform-specific paths at runtime.)
+
+    In addition to these new keywords, this class also has several new methods
+    for manipulating the distribution's contents.  For example, the 'include()'
+    and 'exclude()' methods can be thought of as in-place add and subtract
+    commands that add or remove packages, modules, extensions, and so on from
+    the distribution.
+    """
+
+    _DISTUTILS_UNSUPPORTED_METADATA = {
+        'long_description_content_type': lambda: None,
+        'project_urls': dict,
+        'provides_extras': dict,  # behaves like an ordered set
+        'license_expression': lambda: None,
+        'license_file': lambda: None,
+        'license_files': lambda: None,
+        'install_requires': list,
+        'extras_require': dict,
+    }
+
+    # Used by build_py, editable_wheel and install_lib commands for legacy namespaces
+    namespace_packages: list[str]  #: :meta private: DEPRECATED
+
+    # Any: Dynamic assignment results in Incompatible types in assignment
+    def __init__(self, attrs: MutableMapping[str, Any] | None = None) -> None:
+        have_package_data = hasattr(self, "package_data")
+        if not have_package_data:
+            self.package_data: dict[str, list[str]] = {}
+        attrs = attrs or {}
         self.dist_files: list[tuple[str, str, str]] = []
+        self.include_package_data: bool | None = None
+        self.exclude_package_data: dict[str, list[str]] | None = None
+        # Filter-out setuptools' specific options.
+        self.src_root: str | None = attrs.pop("src_root", None)
+        self.dependency_links: list[str] = attrs.pop('dependency_links', [])
+        self.setup_requires: list[str] = attrs.pop('setup_requires', [])
+        for ep in metadata.entry_points(group='distutils.setup_keywords'):
+            vars(self).setdefault(ep.name, None)
 
-        # These options are really the business of various commands, rather
-        # than of the Distribution itself.  We provide aliases for them in
-        # Distribution as a convenience to the developer.
-        self.packages = None
-        self.package_data: dict[str, list[str]] = {}
-        self.package_dir = None
-        self.py_modules = None
-        self.libraries = None
-        self.headers = None
-        self.ext_modules = None
-        self.ext_package = None
-        self.include_dirs = None
-        self.extra_path = None
-        self.scripts = None
-        self.data_files = None
-        self.password = ''
+        metadata_only = set(self._DISTUTILS_UNSUPPORTED_METADATA)
+        metadata_only -= {"install_requires", "extras_require"}
+        dist_attrs = {k: v for k, v in attrs.items() if k not in metadata_only}
+        _Distribution.__init__(self, dist_attrs)
 
-        # And now initialize bookkeeping stuff that can't be supplied by
-        # the caller at all.  'command_obj' maps command names to
-        # Command instances -- that's how we enforce that every command
-        # class is a singleton.
-        self.command_obj: dict[str, Command] = {}
+        # Private API (setuptools-use only, not restricted to Distribution)
+        # Stores files that are referenced by the configuration and need to be in the
+        # sdist (e.g. `version = file: VERSION.txt`)
+        self._referenced_files = set[str]()
 
-        # 'have_run' maps command names to boolean values; it keeps track
-        # of whether we have actually run a particular command, to make it
-        # cheap to "run" a command whenever we think we might need to -- if
-        # it's already been done, no need for expensive filesystem
-        # operations, we just check the 'have_run' dictionary and carry on.
-        # It's only safe to query 'have_run' for a command class that has
-        # been instantiated -- a false value will be inserted when the
-        # command object is created, and replaced with a true value when
-        # the command is successfully run.  Thus it's probably best to use
-        # '.get()' rather than a straight lookup.
-        self.have_run: dict[str, bool] = {}
+        self.set_defaults = ConfigDiscovery(self)
 
-        # Now we'll use the attrs dictionary (ultimately, keyword args from
-        # the setup script) to possibly override any or all of these
-        # distribution options.
+        self._set_metadata_defaults(attrs)
 
-        if attrs:
-            # Pull out the set of command options and work on them
-            # specifically.  Note that this order guarantees that aliased
-            # command options will override any supplied redundantly
-            # through the general options dictionary.
-            options = attrs.get('options')
-            if options is not None:
-                del attrs['options']
-                for command, cmd_options in options.items():
-                    opt_dict = self.get_option_dict(command)
-                    for opt, val in cmd_options.items():
-                        opt_dict[opt] = ("setup script", val)
+        self.metadata.version = self._normalize_version(self.metadata.version)
+        self._finalize_requires()
 
-            if 'licence' in attrs:
-                attrs['license'] = attrs['licence']
-                del attrs['licence']
-                msg = "'licence' distribution option is deprecated; use 'license'"
-                warnings.warn(msg)
+    def _validate_metadata(self):
+        required = {"name"}
+        provided = {
+            key
+            for key in vars(self.metadata)
+            if getattr(self.metadata, key, None) is not None
+        }
+        missing = required - provided
 
-            # Now work on the rest of the attributes.  Any attribute that's
-            # not already defined is invalid!
-            for key, val in attrs.items():
-                if hasattr(self.metadata, "set_" + key):
-                    getattr(self.metadata, "set_" + key)(val)
-                elif hasattr(self.metadata, key):
-                    setattr(self.metadata, key, val)
-                elif hasattr(self, key):
-                    setattr(self, key, val)
-                else:
-                    msg = f"Unknown distribution option: {key!r}"
-                    warnings.warn(msg)
+        if missing:
+            msg = f"Required package metadata is missing: {missing}"
+            raise DistutilsSetupError(msg)
 
-        # no-user-cfg is handled before other command line args
-        # because other args override the config files, and this
-        # one is needed before we can load the config files.
-        # If attrs['script_args'] wasn't passed, assume false.
-        #
-        # This also make sure we just look at the global options
-        self.want_user_cfg = True
-
-        if self.script_args is not None:
-            # Coerce any possible iterable from attrs into a list
-            self.script_args = list(self.script_args)
-            for arg in self.script_args:
-                if not arg.startswith('-'):
-                    break
-                if arg == '--no-user-cfg':
-                    self.want_user_cfg = False
-                    break
-
-        self.finalize_options()
-
-    def get_option_dict(self, command):
-        """Get the option dictionary for a given command.  If that
-        command's option dictionary hasn't been created yet, then create it
-        and return the new dictionary; otherwise, return the existing
-        option dictionary.
+    def _set_metadata_defaults(self, attrs):
         """
-        dict = self.command_options.get(command)
-        if dict is None:
-            dict = self.command_options[command] = {}
-        return dict
-
-    def dump_option_dicts(self, header=None, commands=None, indent: str = "") -> None:
-        from pprint import pformat
-
-        if commands is None:  # dump all command option dicts
-            commands = sorted(self.command_options.keys())
-
-        if header is not None:
-            self.announce(indent + header)
-            indent = indent + "  "
-
-        if not commands:
-            self.announce(indent + "no commands known yet")
-            return
-
-        for cmd_name in commands:
-            opt_dict = self.command_options.get(cmd_name)
-            if opt_dict is None:
-                self.announce(indent + f"no option dict for '{cmd_name}' command")
-            else:
-                self.announce(indent + f"option dict for '{cmd_name}' command:")
-                out = pformat(opt_dict)
-                for line in out.split('\n'):
-                    self.announce(indent + "  " + line)
-
-    # -- Config file finding/parsing methods ---------------------------
-
-    def find_config_files(self):
-        """Find as many configuration files as should be processed for this
-        platform, and return a list of filenames in the order in which they
-        should be parsed.  The filenames returned are guaranteed to exist
-        (modulo nasty race conditions).
-
-        There are multiple possible config files:
-        - distutils.cfg in the Distutils installation directory (i.e.
-          where the top-level Distutils __inst__.py file lives)
-        - a file in the user's home directory named .pydistutils.cfg
-          on Unix and pydistutils.cfg on Windows/Mac; may be disabled
-          with the ``--no-user-cfg`` option
-        - setup.cfg in the current directory
-        - a file named by an environment variable
+        Fill-in missing metadata fields not supported by distutils.
+        Some fields may have been set by other tools (e.g. pbr).
+        Those fields (vars(self.metadata)) take precedence to
+        supplied attrs.
         """
-        check_environ()
-        files = [str(path) for path in self._gen_paths() if os.path.isfile(path)]
+        for option, default in self._DISTUTILS_UNSUPPORTED_METADATA.items():
+            vars(self.metadata).setdefault(option, attrs.get(option, default()))
 
-        if DEBUG:
-            self.announce("using config files: {}".format(', '.join(files)))
+    @staticmethod
+    def _normalize_version(version):
+        from . import sic
 
-        return files
+        if isinstance(version, numbers.Number):
+            # Some people apparently take "version number" too literally :)
+            version = str(version)
+        elif isinstance(version, sic) or version is None:
+            return version
 
-    def _gen_paths(self):
-        # The system-wide Distutils config file
-        sys_dir = pathlib.Path(sys.modules['distutils'].__file__).parent
-        yield sys_dir / "distutils.cfg"
+        normalized = str(Version(version))
+        if version != normalized:
+            InformationOnly.emit(f"Normalizing '{version}' to '{normalized}'")
+            return normalized
+        return version
 
-        # The per-user config file
-        prefix = '.' * (os.name == 'posix')
-        filename = prefix + 'pydistutils.cfg'
-        if self.want_user_cfg:
-            with contextlib.suppress(RuntimeError):
-                yield pathlib.Path('~').expanduser() / filename
+    def _finalize_requires(self):
+        """
+        Set `metadata.python_requires` and fix environment markers
+        in `install_requires` and `extras_require`.
+        """
+        if getattr(self, 'python_requires', None):
+            self.metadata.python_requires = self.python_requires
 
-        # All platforms support local setup.cfg
-        yield pathlib.Path('setup.cfg')
+        self._normalize_requires()
+        self.metadata.install_requires = self.install_requires
+        self.metadata.extras_require = self.extras_require
 
-        # Additional config indicated in the environment
-        with contextlib.suppress(TypeError):
-            yield pathlib.Path(os.getenv("DIST_EXTRA_CONFIG"))
+        if self.extras_require:
+            for extra in self.extras_require.keys():
+                # Setuptools allows a weird "<name>:<env markers> syntax for extras
+                extra = extra.split(':')[0]
+                if extra:
+                    self.metadata.provides_extras.setdefault(extra)
 
-    def parse_config_files(self, filenames=None):  # noqa: C901
+    def _normalize_requires(self):
+        """Make sure requirement-related attributes exist and are normalized"""
+        install_requires = getattr(self, "install_requires", None) or []
+        extras_require = getattr(self, "extras_require", None) or {}
+
+        # Preserve the "static"-ness of values parsed from config files
+        list_ = _static.List if _static.is_static(install_requires) else list
+        self.install_requires = list_(map(str, _reqs.parse(install_requires)))
+
+        dict_ = _static.Dict if _static.is_static(extras_require) else dict
+        self.extras_require = dict_(
+            (k, list(map(str, _reqs.parse(v or [])))) for k, v in extras_require.items()
+        )
+
+    def _finalize_license_expression(self) -> None:
+        """
+        Normalize license and license_expression.
+        >>> dist = Distribution({"license_expression": _static.Str("mit aNd  gpl-3.0-OR-later")})
+        >>> _static.is_static(dist.metadata.license_expression)
+        True
+        >>> dist._finalize_license_expression()
+        >>> _static.is_static(dist.metadata.license_expression)  # preserve "static-ness"
+        True
+        >>> print(dist.metadata.license_expression)
+        MIT AND GPL-3.0-or-later
+        """
+        classifiers = self.metadata.get_classifiers()
+        license_classifiers = [cl for cl in classifiers if cl.startswith("License :: ")]
+
+        license_expr = self.metadata.license_expression
+        if license_expr:
+            str_ = _static.Str if _static.is_static(license_expr) else str
+            normalized = str_(_canonicalize_license_expression(license_expr))
+            if license_expr != normalized:
+                InformationOnly.emit(f"Normalizing '{license_expr}' to '{normalized}'")
+                self.metadata.license_expression = normalized
+            if license_classifiers:
+                raise InvalidConfigError(
+                    "License classifiers have been superseded by license expressions "
+                    "(see https://peps.python.org/pep-0639/). Please remove:\n\n"
+                    + "\n".join(license_classifiers),
+                )
+        elif license_classifiers:
+            pypa_guides = "guides/writing-pyproject-toml/#license"
+            SetuptoolsDeprecationWarning.emit(
+                "License classifiers are deprecated.",
+                "Please consider removing the following classifiers in favor of a "
+                "SPDX license expression:\n\n" + "\n".join(license_classifiers),
+                see_url=f"https://packaging.python.org/en/latest/{pypa_guides}",
+                # Warning introduced on 2025-02-17
+                # TODO: Should we add a due date? It may affect old/unmaintained
+                #       packages in the ecosystem and cause problems...
+            )
+
+    def _finalize_license_files(self) -> None:
+        """Compute names of all license files which should be included."""
+        license_files: list[str] | None = self.metadata.license_files
+        patterns = license_files or []
+
+        license_file: str | None = self.metadata.license_file
+        if license_file and license_file not in patterns:
+            patterns.append(license_file)
+
+        if license_files is None and license_file is None:
+            # Default patterns match the ones wheel uses
+            # See https://wheel.readthedocs.io/en/stable/user_guide.html
+            # -> 'Including license files in the generated wheel file'
+            patterns = ['LICEN[CS]E*', 'COPYING*', 'NOTICE*', 'AUTHORS*']
+            files = self._expand_patterns(patterns, enforce_match=False)
+        else:  # Patterns explicitly given by the user
+            files = self._expand_patterns(patterns, enforce_match=True)
+
+        self.metadata.license_files = list(unique_everseen(files))
+
+    @classmethod
+    def _expand_patterns(
+        cls, patterns: list[str], enforce_match: bool = True
+    ) -> Iterator[str]:
+        """
+        >>> getfixture('sample_project_cwd')
+        >>> list(Distribution._expand_patterns(['LICENSE.txt']))
+        ['LICENSE.txt']
+        >>> list(Distribution._expand_patterns(['pyproject.toml', 'LIC*']))
+        ['pyproject.toml', 'LICENSE.txt']
+        >>> list(Distribution._expand_patterns(['src/**/*.dat']))
+        ['src/sample/package_data.dat']
+        """
+        return (
+            path.replace(os.sep, "/")
+            for pattern in patterns
+            for path in sorted(cls._find_pattern(pattern, enforce_match))
+            if not path.endswith('~') and os.path.isfile(path)
+        )
+
+    @staticmethod
+    def _find_pattern(pattern: str, enforce_match: bool = True) -> list[str]:
+        r"""
+        >>> getfixture('sample_project_cwd')
+        >>> Distribution._find_pattern("LICENSE.txt")
+        ['LICENSE.txt']
+        >>> Distribution._find_pattern("/LICENSE.MIT")
+        Traceback (most recent call last):
+        ...
+        setuptools.errors.InvalidConfigError: Pattern '/LICENSE.MIT' should be relative...
+        >>> Distribution._find_pattern("../LICENSE.MIT")
+        Traceback (most recent call last):
+        ...
+        setuptools.warnings.SetuptoolsDeprecationWarning: ...Pattern '../LICENSE.MIT' cannot contain '..'...
+        >>> Distribution._find_pattern("LICEN{CSE*")
+        Traceback (most recent call last):
+        ...
+        setuptools.warnings.SetuptoolsDeprecationWarning: ...Pattern 'LICEN{CSE*' contains invalid characters...
+        """
+        pypa_guides = "specifications/glob-patterns/"
+        if ".." in pattern:
+            SetuptoolsDeprecationWarning.emit(
+                f"Pattern {pattern!r} cannot contain '..'",
+                """
+                Please ensure the files specified are contained by the root
+                of the Python package (normally marked by `pyproject.toml`).
+                """,
+                see_url=f"https://packaging.python.org/en/latest/{pypa_guides}",
+                due_date=(2027, 2, 18),  # Introduced in 2025-03-20
+                # Replace with InvalidConfigError after deprecation
+            )
+        if pattern.startswith((os.sep, "/")) or ":\\" in pattern:
+            raise InvalidConfigError(
+                f"Pattern {pattern!r} should be relative and must not start with '/'"
+            )
+        if re.match(r'^[\w\-\.\/\*\?\[\]]+$', pattern) is None:
+            SetuptoolsDeprecationWarning.emit(
+                "Please provide a valid glob pattern.",
+                "Pattern {pattern!r} contains invalid characters.",
+                pattern=pattern,
+                see_url=f"https://packaging.python.org/en/latest/{pypa_guides}",
+                due_date=(2027, 2, 18),  # Introduced in 2025-02-20
+            )
+
+        found = glob(pattern, recursive=True)
+
+        if enforce_match and not found:
+            SetuptoolsDeprecationWarning.emit(
+                "Cannot find any files for the given pattern.",
+                "Pattern {pattern!r} did not match any files.",
+                pattern=pattern,
+                due_date=(2027, 2, 18),  # Introduced in 2025-02-20
+                # PEP 639 requires us to error, but as a transition period
+                # we will only issue a warning to give people time to prepare.
+                # After the transition, this should raise an InvalidConfigError.
+            )
+        return found
+
+    # FIXME: 'Distribution._parse_config_files' is too complex (14)
+    def _parse_config_files(self, filenames=None):  # noqa: C901
+        """
+        Adapted from distutils.dist.Distribution.parse_config_files,
+        this method provides the same functionality in subtly-improved
+        ways.
+        """
         from configparser import ConfigParser
 
         # Ignore install directory options if we have a venv
-        if sys.prefix != sys.base_prefix:
-            ignore_options = [
+        ignore_options = (
+            []
+            if sys.prefix == sys.base_prefix
+            else [
                 'install-base',
                 'install-platbase',
                 'install-lib',
@@ -405,8 +570,7 @@ Common commands: (see '--help-commands' for more)
                 'user',
                 'root',
             ]
-        else:
-            ignore_options = []
+        )
 
         ignore_options = frozenset(ignore_options)
 
@@ -417,491 +581,122 @@ Common commands: (see '--help-commands' for more)
             self.announce("Distribution.parse_config_files():")
 
         parser = ConfigParser()
+        parser.optionxform = str
         for filename in filenames:
-            if DEBUG:
-                self.announce(f"  reading {filename}")
-            parser.read(filename, encoding='utf-8')
+            with open(filename, encoding='utf-8') as reader:
+                if DEBUG:
+                    self.announce("  reading {filename}".format(**locals()))
+                parser.read_file(reader)
             for section in parser.sections():
                 options = parser.options(section)
                 opt_dict = self.get_option_dict(section)
 
                 for opt in options:
-                    if opt != '__name__' and opt not in ignore_options:
-                        val = parser.get(section, opt)
-                        opt = opt.replace('-', '_')
-                        opt_dict[opt] = (filename, val)
+                    if opt == '__name__' or opt in ignore_options:
+                        continue
+
+                    val = parser.get(section, opt)
+                    opt = self._enforce_underscore(opt, section)
+                    opt = self._enforce_option_lowercase(opt, section)
+                    opt_dict[opt] = (filename, val)
 
             # Make the ConfigParser forget everything (so we retain
             # the original filenames that options come from)
             parser.__init__()
 
+        if 'global' not in self.command_options:
+            return
+
         # If there was a "global" section in the config file, use it
         # to set Distribution options.
 
-        if 'global' in self.command_options:
-            for opt, (_src, val) in self.command_options['global'].items():
-                alias = self.negative_opt.get(opt)
-                try:
-                    if alias:
-                        setattr(self, alias, not strtobool(val))
-                    elif opt in ('verbose',):  # ugh!
-                        setattr(self, opt, strtobool(val))
-                    else:
-                        setattr(self, opt, val)
-                except ValueError as msg:
-                    raise DistutilsOptionError(msg)
+        for opt, (src, val) in self.command_options['global'].items():
+            alias = self.negative_opt.get(opt)
+            if alias:
+                val = not strtobool(val)
+            elif opt == 'verbose':
+                val = strtobool(val)
 
-    # -- Command-line parsing methods ----------------------------------
+            try:
+                setattr(self, alias or opt, val)
+            except ValueError as e:
+                raise DistutilsOptionError(e) from e
 
-    def parse_command_line(self):
-        """Parse the setup script's command line, taken from the
-        'script_args' instance attribute (which defaults to 'sys.argv[1:]'
-        -- see 'setup()' in core.py).  This list is first processed for
-        "global options" -- options that set attributes of the Distribution
-        instance.  Then, it is alternately scanned for Distutils commands
-        and options for that command.  Each new command terminates the
-        options for the previous command.  The allowed options for a
-        command are determined by the 'user_options' attribute of the
-        command class -- thus, we have to be able to load command classes
-        in order to parse the command line.  Any error in that 'options'
-        attribute raises DistutilsGetoptError; any error on the
-        command-line raises DistutilsArgError.  If no Distutils commands
-        were found on the command line, raises DistutilsArgError.  Return
-        true if command-line was successfully parsed and we should carry
-        on with executing commands; false if no errors but we shouldn't
-        execute commands (currently, this only happens if user asks for
-        help).
-        """
-        #
-        # We now have enough information to show the Macintosh dialog
-        # that allows the user to interactively specify the "command line".
-        #
-        toplevel_options = self._get_toplevel_options()
+    def _enforce_underscore(self, opt: str, section: str) -> str:
+        if "-" not in opt or self._skip_setupcfg_normalization(section):
+            return opt
 
-        # We have to parse the command line a bit at a time -- global
-        # options, then the first command, then its options, and so on --
-        # because each command will be handled by a different class, and
-        # the options that are valid for a particular class aren't known
-        # until we have loaded the command class, which doesn't happen
-        # until we know what the command is.
+        underscore_opt = opt.replace('-', '_')
+        affected = f"(Affected: {self.metadata.name})." if self.metadata.name else ""
+        SetuptoolsDeprecationWarning.emit(
+            f"Invalid dash-separated key {opt!r} in {section!r} (setup.cfg), "
+            f"please use the underscore name {underscore_opt!r} instead.",
+            f"""
+            Usage of dash-separated {opt!r} will not be supported in future
+            versions. Please use the underscore name {underscore_opt!r} instead.
+            {affected}
 
-        self.commands = []
-        parser = FancyGetopt(toplevel_options + self.display_options)
-        parser.set_negative_aliases(self.negative_opt)
-        parser.set_aliases({'licence': 'license'})
-        args = parser.getopt(args=self.script_args, object=self)
-        option_order = parser.get_option_order()
-        logging.getLogger().setLevel(logging.WARN - 10 * self.verbose)
-
-        # for display options we return immediately
-        if self.handle_display_options(option_order):
-            return
-        while args:
-            args = self._parse_command_opts(parser, args)
-            if args is None:  # user asked for help (and got it)
-                return
-
-        # Handle the cases of --help as a "global" option, ie.
-        # "setup.py --help" and "setup.py --help command ...".  For the
-        # former, we show global options (--verbose, --dry-run, etc.)
-        # and display-only options (--name, --version, etc.); for the
-        # latter, we omit the display-only options and show help for
-        # each command listed on the command line.
-        if self.help:
-            self._show_help(
-                parser, display_options=len(self.commands) == 0, commands=self.commands
-            )
-            return
-
-        # Oops, no commands found -- an end-user error
-        if not self.commands:
-            raise DistutilsArgError("no commands supplied")
-
-        # All is well: return true
-        return True
-
-    def _get_toplevel_options(self):
-        """Return the non-display options recognized at the top level.
-
-        This includes options that are recognized *only* at the top
-        level as well as options recognized for commands.
-        """
-        return self.global_options + [
-            (
-                "command-packages=",
-                None,
-                "list of packages that provide distutils commands",
-            ),
-        ]
-
-    def _parse_command_opts(self, parser, args):  # noqa: C901
-        """Parse the command-line options for a single command.
-        'parser' must be a FancyGetopt instance; 'args' must be the list
-        of arguments, starting with the current command (whose options
-        we are about to parse).  Returns a new version of 'args' with
-        the next command at the front of the list; will be the empty
-        list if there are no more commands on the command line.  Returns
-        None if the user asked for help on this command.
-        """
-        # late import because of mutual dependence between these modules
-        from distutils.cmd import Command
-
-        # Pull the current command from the head of the command line
-        command = args[0]
-        if not command_re.match(command):
-            raise SystemExit(f"invalid command name '{command}'")
-        self.commands.append(command)
-
-        # Dig up the command class that implements this command, so we
-        # 1) know that it's a valid command, and 2) know which options
-        # it takes.
-        try:
-            cmd_class = self.get_command_class(command)
-        except DistutilsModuleError as msg:
-            raise DistutilsArgError(msg)
-
-        # Require that the command class be derived from Command -- want
-        # to be sure that the basic "command" interface is implemented.
-        if not issubclass(cmd_class, Command):
-            raise DistutilsClassError(
-                f"command class {cmd_class} must subclass Command"
-            )
-
-        # Also make sure that the command object provides a list of its
-        # known options.
-        if not (
-            hasattr(cmd_class, 'user_options')
-            and isinstance(cmd_class.user_options, list)
-        ):
-            msg = (
-                "command class %s must provide "
-                "'user_options' attribute (a list of tuples)"
-            )
-            raise DistutilsClassError(msg % cmd_class)
-
-        # If the command class has a list of negative alias options,
-        # merge it in with the global negative aliases.
-        negative_opt = self.negative_opt
-        if hasattr(cmd_class, 'negative_opt'):
-            negative_opt = negative_opt.copy()
-            negative_opt.update(cmd_class.negative_opt)
-
-        # Check for help_options in command class.  They have a different
-        # format (tuple of four) so we need to preprocess them here.
-        if hasattr(cmd_class, 'help_options') and isinstance(
-            cmd_class.help_options, list
-        ):
-            help_options = fix_help_options(cmd_class.help_options)
-        else:
-            help_options = []
-
-        # All commands support the global options too, just by adding
-        # in 'global_options'.
-        parser.set_option_table(
-            self.global_options + cmd_class.user_options + help_options
+            Available configuration options are listed in:
+            https://setuptools.pypa.io/en/latest/userguide/declarative_config.html
+            """,
+            see_url="https://github.com/pypa/setuptools/discussions/5011",
+            due_date=(2026, 3, 3),
+            # Warning initially introduced in 3 Mar 2021
         )
-        parser.set_negative_aliases(negative_opt)
-        (args, opts) = parser.getopt(args[1:])
-        if hasattr(opts, 'help') and opts.help:
-            self._show_help(parser, display_options=False, commands=[cmd_class])
-            return
+        return underscore_opt
 
-        if hasattr(cmd_class, 'help_options') and isinstance(
-            cmd_class.help_options, list
-        ):
-            help_option_found = 0
-            for help_option, _short, _desc, func in cmd_class.help_options:
-                if hasattr(opts, parser.get_attr_name(help_option)):
-                    help_option_found = 1
-                    if callable(func):
-                        func()
-                    else:
-                        raise DistutilsClassError(
-                            f"invalid help function {func!r} for help option '{help_option}': "
-                            "must be a callable object (function, etc.)"
-                        )
+    def _enforce_option_lowercase(self, opt: str, section: str) -> str:
+        if opt.islower() or self._skip_setupcfg_normalization(section):
+            return opt
 
-            if help_option_found:
-                return
+        lowercase_opt = opt.lower()
+        affected = f"(Affected: {self.metadata.name})." if self.metadata.name else ""
+        SetuptoolsDeprecationWarning.emit(
+            f"Invalid uppercase key {opt!r} in {section!r} (setup.cfg), "
+            f"please use lowercase {lowercase_opt!r} instead.",
+            f"""
+            Usage of uppercase key {opt!r} in {section!r} will not be supported in
+            future versions. Please use lowercase {lowercase_opt!r} instead.
+            {affected}
 
-        # Put the options from the command-line into their official
-        # holding pen, the 'command_options' dictionary.
-        opt_dict = self.get_option_dict(command)
-        for name, value in vars(opts).items():
-            opt_dict[name] = ("command line", value)
+            Available configuration options are listed in:
+            https://setuptools.pypa.io/en/latest/userguide/declarative_config.html
+            """,
+            see_url="https://github.com/pypa/setuptools/discussions/5011",
+            due_date=(2026, 3, 3),
+            # Warning initially introduced in 6 Mar 2021
+        )
+        return lowercase_opt
 
-        return args
+    def _skip_setupcfg_normalization(self, section: str) -> bool:
+        skip = (
+            'options.extras_require',
+            'options.data_files',
+            'options.entry_points',
+            'options.package_data',
+            'options.exclude_package_data',
+        )
+        return section in skip or not self._is_setuptools_section(section)
 
-    def finalize_options(self) -> None:
-        """Set final values for all the options on the Distribution
-        instance, analogous to the .finalize_options() method of Command
-        objects.
-        """
-        for attr in ('keywords', 'platforms'):
-            value = getattr(self.metadata, attr)
-            if value is None:
-                continue
-            if isinstance(value, str):
-                value = [elm.strip() for elm in value.split(',')]
-                setattr(self.metadata, attr, value)
+    def _is_setuptools_section(self, section: str) -> bool:
+        return (
+            section == "metadata"
+            or section.startswith("options")
+            or section in _setuptools_commands()
+        )
 
-    def _show_help(
-        self, parser, global_options=True, display_options=True, commands: Iterable = ()
-    ):
-        """Show help for the setup script command-line in the form of
-        several lists of command-line options.  'parser' should be a
-        FancyGetopt instance; do not expect it to be returned in the
-        same state, as its option table will be reset to make it
-        generate the correct help text.
-
-        If 'global_options' is true, lists the global options:
-        --verbose, --dry-run, etc.  If 'display_options' is true, lists
-        the "display-only" options: --name, --version, etc.  Finally,
-        lists per-command help for every command name or command class
-        in 'commands'.
-        """
-        # late import because of mutual dependence between these modules
-        from distutils.cmd import Command
-        from distutils.core import gen_usage
-
-        if global_options:
-            if display_options:
-                options = self._get_toplevel_options()
-            else:
-                options = self.global_options
-            parser.set_option_table(options)
-            parser.print_help(self.common_usage + "\nGlobal options:")
-            print()
-
-        if display_options:
-            parser.set_option_table(self.display_options)
-            parser.print_help(
-                "Information display options (just display information, ignore any commands)"
-            )
-            print()
-
-        for command in commands:
-            if isinstance(command, type) and issubclass(command, Command):
-                klass = command
-            else:
-                klass = self.get_command_class(command)
-            if hasattr(klass, 'help_options') and isinstance(klass.help_options, list):
-                parser.set_option_table(
-                    klass.user_options + fix_help_options(klass.help_options)
-                )
-            else:
-                parser.set_option_table(klass.user_options)
-            parser.print_help(f"Options for '{klass.__name__}' command:")
-            print()
-
-        print(gen_usage(self.script_name))
-
-    def handle_display_options(self, option_order):
-        """If there were any non-global "display-only" options
-        (--help-commands or the metadata display options) on the command
-        line, display the requested info and return true; else return
-        false.
-        """
-        from distutils.core import gen_usage
-
-        # User just wants a list of commands -- we'll print it out and stop
-        # processing now (ie. if they ran "setup --help-commands foo bar",
-        # we ignore "foo bar").
-        if self.help_commands:
-            self.print_commands()
-            print()
-            print(gen_usage(self.script_name))
-            return 1
-
-        # If user supplied any of the "display metadata" options, then
-        # display that metadata in the order in which the user supplied the
-        # metadata options.
-        any_display_options = 0
-        is_display_option = set()
-        for option in self.display_options:
-            is_display_option.add(option[0])
-
-        for opt, val in option_order:
-            if val and opt in is_display_option:
-                opt = translate_longopt(opt)
-                value = getattr(self.metadata, "get_" + opt)()
-                if opt in ('keywords', 'platforms'):
-                    print(','.join(value))
-                elif opt in ('classifiers', 'provides', 'requires', 'obsoletes'):
-                    print('\n'.join(value))
-                else:
-                    print(value)
-                any_display_options = 1
-
-        return any_display_options
-
-    def print_command_list(self, commands, header, max_length) -> None:
-        """Print a subset of the list of all commands -- used by
-        'print_commands()'.
-        """
-        print(header + ":")
-
-        for cmd in commands:
-            klass = self.cmdclass.get(cmd)
-            if not klass:
-                klass = self.get_command_class(cmd)
-            try:
-                description = klass.description
-            except AttributeError:
-                description = "(no description available)"
-
-            print(f"  {cmd:<{max_length}}  {description}")
-
-    def print_commands(self) -> None:
-        """Print out a help message listing all available commands with a
-        description of each.  The list is divided into "standard commands"
-        (listed in distutils.command.__all__) and "extra commands"
-        (mentioned in self.cmdclass, but not a standard command).  The
-        descriptions come from the command class attribute
-        'description'.
-        """
-        import distutils.command
-
-        std_commands = distutils.command.__all__
-        is_std = set(std_commands)
-
-        extra_commands = [cmd for cmd in self.cmdclass.keys() if cmd not in is_std]
-
-        max_length = 0
-        for cmd in std_commands + extra_commands:
-            if len(cmd) > max_length:
-                max_length = len(cmd)
-
-        self.print_command_list(std_commands, "Standard commands", max_length)
-        if extra_commands:
-            print()
-            self.print_command_list(extra_commands, "Extra commands", max_length)
-
-    def get_command_list(self):
-        """Get a list of (command, description) tuples.
-        The list is divided into "standard commands" (listed in
-        distutils.command.__all__) and "extra commands" (mentioned in
-        self.cmdclass, but not a standard command).  The descriptions come
-        from the command class attribute 'description'.
-        """
-        # Currently this is only used on Mac OS, for the Mac-only GUI
-        # Distutils interface (by Jack Jansen)
-        import distutils.command
-
-        std_commands = distutils.command.__all__
-        is_std = set(std_commands)
-
-        extra_commands = [cmd for cmd in self.cmdclass.keys() if cmd not in is_std]
-
-        rv = []
-        for cmd in std_commands + extra_commands:
-            klass = self.cmdclass.get(cmd)
-            if not klass:
-                klass = self.get_command_class(cmd)
-            try:
-                description = klass.description
-            except AttributeError:
-                description = "(no description available)"
-            rv.append((cmd, description))
-        return rv
-
-    # -- Command class/object methods ----------------------------------
-
-    def get_command_packages(self):
-        """Return a list of packages from which commands are loaded."""
-        pkgs = self.command_packages
-        if not isinstance(pkgs, list):
-            if pkgs is None:
-                pkgs = ''
-            pkgs = [pkg.strip() for pkg in pkgs.split(',') if pkg != '']
-            if "distutils.command" not in pkgs:
-                pkgs.insert(0, "distutils.command")
-            self.command_packages = pkgs
-        return pkgs
-
-    def get_command_class(self, command: str) -> type[Command]:
-        """Return the class that implements the Distutils command named by
-        'command'.  First we check the 'cmdclass' dictionary; if the
-        command is mentioned there, we fetch the class object from the
-        dictionary and return it.  Otherwise we load the command module
-        ("distutils.command." + command) and fetch the command class from
-        the module.  The loaded class is also stored in 'cmdclass'
-        to speed future calls to 'get_command_class()'.
-
-        Raises DistutilsModuleError if the expected module could not be
-        found, or if that module does not define the expected class.
-        """
-        klass = self.cmdclass.get(command)
-        if klass:
-            return klass
-
-        for pkgname in self.get_command_packages():
-            module_name = f"{pkgname}.{command}"
-            klass_name = command
-
-            try:
-                __import__(module_name)
-                module = sys.modules[module_name]
-            except ImportError:
-                continue
-
-            try:
-                klass = getattr(module, klass_name)
-            except AttributeError:
-                raise DistutilsModuleError(
-                    f"invalid command '{command}' (no class '{klass_name}' in module '{module_name}')"
-                )
-
-            self.cmdclass[command] = klass
-            return klass
-
-        raise DistutilsModuleError(f"invalid command '{command}'")
-
-    @overload
-    def get_command_obj(
-        self, command: str, create: Literal[True] = True
-    ) -> Command: ...
-    @overload
-    def get_command_obj(
-        self, command: str, create: Literal[False]
-    ) -> Command | None: ...
-    def get_command_obj(self, command: str, create: bool = True) -> Command | None:
-        """Return the command object for 'command'.  Normally this object
-        is cached on a previous call to 'get_command_obj()'; if no command
-        object for 'command' is in the cache, then we either create and
-        return it (if 'create' is true) or return None.
-        """
-        cmd_obj = self.command_obj.get(command)
-        if not cmd_obj and create:
-            if DEBUG:
-                self.announce(
-                    "Distribution.get_command_obj(): "
-                    f"creating '{command}' command object"
-                )
-
-            klass = self.get_command_class(command)
-            cmd_obj = self.command_obj[command] = klass(self)
-            self.have_run[command] = False
-
-            # Set any options that were supplied in config files
-            # or on the command line.  (NB. support for error
-            # reporting is lame here: any errors aren't reported
-            # until 'finalize_options()' is called, which means
-            # we won't report the source of the error.)
-            options = self.command_options.get(command)
-            if options:
-                self._set_command_options(cmd_obj, options)
-
-        return cmd_obj
-
+    # FIXME: 'Distribution._set_command_options' is too complex (14)
     def _set_command_options(self, command_obj, option_dict=None):  # noqa: C901
-        """Set the options for 'command_obj' from 'option_dict'.  Basically
+        """
+        Set the options for 'command_obj' from 'option_dict'.  Basically
         this means copying elements of a dictionary ('option_dict') to
         attributes of an instance ('command').
 
         'command_obj' must be a Command instance.  If 'option_dict' is not
         supplied, uses the standard option dictionary for this command
         (from 'self.command_options').
+
+        (Adopted from distutils.dist.Distribution._set_command_options)
         """
         command_name = command_obj.get_command_name()
         if option_dict is None:
@@ -933,452 +728,397 @@ Common commands: (see '--help-commands' for more)
                     raise DistutilsOptionError(
                         f"error in {source}: command '{command_name}' has no such option '{option}'"
                     )
-            except ValueError as msg:
-                raise DistutilsOptionError(msg)
+            except ValueError as e:
+                raise DistutilsOptionError(e) from e
 
-    @overload
-    def reinitialize_command(
-        self, command: str, reinit_subcommands: bool = False
-    ) -> Command: ...
-    @overload
-    def reinitialize_command(
-        self, command: _CommandT, reinit_subcommands: bool = False
-    ) -> _CommandT: ...
-    def reinitialize_command(
-        self, command: str | Command, reinit_subcommands=False
-    ) -> Command:
-        """Reinitializes a command to the state it was in when first
-        returned by 'get_command_obj()': ie., initialized but not yet
-        finalized.  This provides the opportunity to sneak option
-        values in programmatically, overriding or supplementing
-        user-supplied values from the config files and command line.
-        You'll have to re-finalize the command object (by calling
-        'finalize_options()' or 'ensure_finalized()') before using it for
-        real.
+    def _get_project_config_files(self, filenames: Iterable[StrPath] | None):
+        """Add default file and split between INI and TOML"""
+        tomlfiles = []
+        standard_project_metadata = Path(self.src_root or os.curdir, "pyproject.toml")
+        if filenames is not None:
+            parts = partition(lambda f: Path(f).suffix == ".toml", filenames)
+            filenames = list(parts[0])  # 1st element => predicate is False
+            tomlfiles = list(parts[1])  # 2nd element => predicate is True
+        elif standard_project_metadata.exists():
+            tomlfiles = [standard_project_metadata]
+        return filenames, tomlfiles
 
-        'command' should be a command name (string) or command object.  If
-        'reinit_subcommands' is true, also reinitializes the command's
-        sub-commands, as declared by the 'sub_commands' class attribute (if
-        it has one).  See the "install" command for an example.  Only
-        reinitializes the sub-commands that actually matter, ie. those
-        whose test predicates return true.
-
-        Returns the reinitialized command object.
-        """
-        from distutils.cmd import Command
-
-        if not isinstance(command, Command):
-            command_name = command
-            command = self.get_command_obj(command_name)
-        else:
-            command_name = command.get_command_name()
-
-        if not command.finalized:
-            return command
-        command.initialize_options()
-        command.finalized = False
-        self.have_run[command_name] = False
-        self._set_command_options(command)
-
-        if reinit_subcommands:
-            for sub in command.get_sub_commands():
-                self.reinitialize_command(sub, reinit_subcommands)
-
-        return command
-
-    # -- Methods that operate on the Distribution ----------------------
-
-    def announce(self, msg, level: int = logging.INFO) -> None:
-        log.log(level, msg)
-
-    def run_commands(self) -> None:
-        """Run each command that was seen on the setup script command line.
-        Uses the list of commands found and cache of command objects
-        created by 'get_command_obj()'.
-        """
-        for cmd in self.commands:
-            self.run_command(cmd)
-
-    # -- Methods that operate on its Commands --------------------------
-
-    def run_command(self, command: str) -> None:
-        """Do whatever it takes to run a command (including nothing at all,
-        if the command has already been run).  Specifically: if we have
-        already created and run the command named by 'command', return
-        silently without doing anything.  If the command named by 'command'
-        doesn't even have a command object yet, create one.  Then invoke
-        'run()' on that command object (or an existing one).
-        """
-        # Already been here, done that? then return silently.
-        if self.have_run.get(command):
-            return
-
-        log.info("running %s", command)
-        cmd_obj = self.get_command_obj(command)
-        cmd_obj.ensure_finalized()
-        cmd_obj.run()
-        self.have_run[command] = True
-
-    # -- Distribution query methods ------------------------------------
-
-    def has_pure_modules(self) -> bool:
-        return len(self.packages or self.py_modules or []) > 0
-
-    def has_ext_modules(self) -> bool:
-        return self.ext_modules and len(self.ext_modules) > 0
-
-    def has_c_libraries(self) -> bool:
-        return self.libraries and len(self.libraries) > 0
-
-    def has_modules(self) -> bool:
-        return self.has_pure_modules() or self.has_ext_modules()
-
-    def has_headers(self) -> bool:
-        return self.headers and len(self.headers) > 0
-
-    def has_scripts(self) -> bool:
-        return self.scripts and len(self.scripts) > 0
-
-    def has_data_files(self) -> bool:
-        return self.data_files and len(self.data_files) > 0
-
-    def is_pure(self) -> bool:
-        return (
-            self.has_pure_modules()
-            and not self.has_ext_modules()
-            and not self.has_c_libraries()
-        )
-
-    # -- Metadata query methods ----------------------------------------
-
-    # If you're looking for 'get_name()', 'get_version()', and so forth,
-    # they are defined in a sneaky way: the constructor binds self.get_XXX
-    # to self.metadata.get_XXX.  The actual code is in the
-    # DistributionMetadata class, below.
-    if TYPE_CHECKING:
-        # Unfortunately this means we need to specify them manually or not expose statically
-        def _(self) -> None:
-            self.get_name = self.metadata.get_name
-            self.get_version = self.metadata.get_version
-            self.get_fullname = self.metadata.get_fullname
-            self.get_author = self.metadata.get_author
-            self.get_author_email = self.metadata.get_author_email
-            self.get_maintainer = self.metadata.get_maintainer
-            self.get_maintainer_email = self.metadata.get_maintainer_email
-            self.get_contact = self.metadata.get_contact
-            self.get_contact_email = self.metadata.get_contact_email
-            self.get_url = self.metadata.get_url
-            self.get_license = self.metadata.get_license
-            self.get_licence = self.metadata.get_licence
-            self.get_description = self.metadata.get_description
-            self.get_long_description = self.metadata.get_long_description
-            self.get_keywords = self.metadata.get_keywords
-            self.get_platforms = self.metadata.get_platforms
-            self.get_classifiers = self.metadata.get_classifiers
-            self.get_download_url = self.metadata.get_download_url
-            self.get_requires = self.metadata.get_requires
-            self.get_provides = self.metadata.get_provides
-            self.get_obsoletes = self.metadata.get_obsoletes
-
-        # Default attributes generated in __init__ from self.display_option_names
-        help_commands: bool
-        name: str | Literal[False]
-        version: str | Literal[False]
-        fullname: str | Literal[False]
-        author: str | Literal[False]
-        author_email: str | Literal[False]
-        maintainer: str | Literal[False]
-        maintainer_email: str | Literal[False]
-        contact: str | Literal[False]
-        contact_email: str | Literal[False]
-        url: str | Literal[False]
-        license: str | Literal[False]
-        licence: str | Literal[False]
-        description: str | Literal[False]
-        long_description: str | Literal[False]
-        platforms: str | list[str] | Literal[False]
-        classifiers: str | list[str] | Literal[False]
-        keywords: str | list[str] | Literal[False]
-        provides: list[str] | Literal[False]
-        requires: list[str] | Literal[False]
-        obsoletes: list[str] | Literal[False]
-
-
-class DistributionMetadata:
-    """Dummy class to hold the distribution meta-data: name, version,
-    author, and so forth.
-    """
-
-    _METHOD_BASENAMES = (
-        "name",
-        "version",
-        "author",
-        "author_email",
-        "maintainer",
-        "maintainer_email",
-        "url",
-        "license",
-        "description",
-        "long_description",
-        "keywords",
-        "platforms",
-        "fullname",
-        "contact",
-        "contact_email",
-        "classifiers",
-        "download_url",
-        # PEP 314
-        "provides",
-        "requires",
-        "obsoletes",
-    )
-
-    def __init__(
-        self, path: str | bytes | os.PathLike[str] | os.PathLike[bytes] | None = None
+    def parse_config_files(
+        self,
+        filenames: Iterable[StrPath] | None = None,
+        ignore_option_errors: bool = False,
     ) -> None:
-        if path is not None:
-            self.read_pkg_file(open(path))
-        else:
-            self.name: str | None = None
-            self.version: str | None = None
-            self.author: str | None = None
-            self.author_email: str | None = None
-            self.maintainer: str | None = None
-            self.maintainer_email: str | None = None
-            self.url: str | None = None
-            self.license: str | None = None
-            self.description: str | None = None
-            self.long_description: str | None = None
-            self.keywords: str | list[str] | None = None
-            self.platforms: str | list[str] | None = None
-            self.classifiers: str | list[str] | None = None
-            self.download_url: str | None = None
-            # PEP 314
-            self.provides: str | list[str] | None = None
-            self.requires: str | list[str] | None = None
-            self.obsoletes: str | list[str] | None = None
+        """Parses configuration files from various levels
+        and loads configuration.
+        """
+        inifiles, tomlfiles = self._get_project_config_files(filenames)
 
-    def read_pkg_file(self, file: IO[str]) -> None:
-        """Reads the metadata values from a file object."""
-        msg = message_from_file(file)
+        self._parse_config_files(filenames=inifiles)
 
-        def _read_field(name: str) -> str | None:
-            value = msg[name]
-            if value and value != "UNKNOWN":
-                return value
-            return None
+        setupcfg.parse_configuration(
+            self, self.command_options, ignore_option_errors=ignore_option_errors
+        )
+        for filename in tomlfiles:
+            pyprojecttoml.apply_configuration(self, filename, ignore_option_errors)
 
-        def _read_list(name):
-            values = msg.get_all(name, None)
-            if values == []:
-                return None
-            return values
+        self._finalize_requires()
+        self._finalize_license_expression()
+        self._finalize_license_files()
 
-        metadata_version = msg['metadata-version']
-        self.name = _read_field('name')
-        self.version = _read_field('version')
-        self.description = _read_field('summary')
-        # we are filling author only.
-        self.author = _read_field('author')
-        self.maintainer = None
-        self.author_email = _read_field('author-email')
-        self.maintainer_email = None
-        self.url = _read_field('home-page')
-        self.license = _read_field('license')
+    def fetch_build_eggs(self, requires: _StrOrIter) -> list[metadata.Distribution]:
+        """Resolve pre-setup requirements"""
+        from .installer import _fetch_build_eggs
 
-        if 'download-url' in msg:
-            self.download_url = _read_field('download-url')
-        else:
-            self.download_url = None
+        return _fetch_build_eggs(self, requires)
 
-        self.long_description = _read_field('description')
-        self.description = _read_field('summary')
+    def finalize_options(self) -> None:
+        """
+        Allow plugins to apply arbitrary operations to the
+        distribution. Each hook may optionally define a 'order'
+        to influence the order of execution. Smaller numbers
+        go first and the default is 0.
+        """
+        group = 'setuptools.finalize_distribution_options'
 
-        if 'keywords' in msg:
-            self.keywords = _read_field('keywords').split(',')
+        def by_order(hook):
+            return getattr(hook, 'order', 0)
 
-        self.platforms = _read_list('platform')
-        self.classifiers = _read_list('classifier')
-
-        # PEP 314 - these fields only exist in 1.1
-        if metadata_version == '1.1':
-            self.requires = _read_list('requires')
-            self.provides = _read_list('provides')
-            self.obsoletes = _read_list('obsoletes')
-        else:
-            self.requires = None
-            self.provides = None
-            self.obsoletes = None
-
-    def write_pkg_info(self, base_dir: str | os.PathLike[str]) -> None:
-        """Write the PKG-INFO file into the release tree."""
-        with open(
-            os.path.join(base_dir, 'PKG-INFO'), 'w', encoding='UTF-8'
-        ) as pkg_info:
-            self.write_pkg_file(pkg_info)
-
-    def write_pkg_file(self, file: SupportsWrite[str]) -> None:
-        """Write the PKG-INFO format data to a file object."""
-        version = '1.0'
-        if (
-            self.provides
-            or self.requires
-            or self.obsoletes
-            or self.classifiers
-            or self.download_url
-        ):
-            version = '1.1'
-
-        # required fields
-        file.write(f'Metadata-Version: {version}\n')
-        file.write(f'Name: {self.get_name()}\n')
-        file.write(f'Version: {self.get_version()}\n')
-
-        def maybe_write(header, val):
-            if val:
-                file.write(f"{header}: {val}\n")
-
-        # optional fields
-        maybe_write("Summary", self.get_description())
-        maybe_write("Home-page", self.get_url())
-        maybe_write("Author", self.get_contact())
-        maybe_write("Author-email", self.get_contact_email())
-        maybe_write("License", self.get_license())
-        maybe_write("Download-URL", self.download_url)
-        maybe_write("Description", rfc822_escape(self.get_long_description() or ""))
-        maybe_write("Keywords", ",".join(self.get_keywords()))
-
-        self._write_list(file, 'Platform', self.get_platforms())
-        self._write_list(file, 'Classifier', self.get_classifiers())
-
-        # PEP 314
-        self._write_list(file, 'Requires', self.get_requires())
-        self._write_list(file, 'Provides', self.get_provides())
-        self._write_list(file, 'Obsoletes', self.get_obsoletes())
-
-    def _write_list(self, file, name, values):
-        values = values or []
-        for value in values:
-            file.write(f'{name}: {value}\n')
-
-    # -- Metadata query methods ----------------------------------------
-
-    def get_name(self) -> str:
-        return self.name or "UNKNOWN"
-
-    def get_version(self) -> str:
-        return self.version or "0.0.0"
-
-    def get_fullname(self) -> str:
-        return self._fullname(self.get_name(), self.get_version())
+        defined = metadata.entry_points(group=group)
+        filtered = itertools.filterfalse(self._removed, defined)
+        loaded = map(lambda e: e.load(), filtered)
+        for ep in sorted(loaded, key=by_order):
+            ep(self)
 
     @staticmethod
-    def _fullname(name: str, version: str) -> str:
+    def _removed(ep):
         """
-        >>> DistributionMetadata._fullname('setup.tools', '1.0-2')
-        'setup_tools-1.0.post2'
-        >>> DistributionMetadata._fullname('setup-tools', '1.2post2')
-        'setup_tools-1.2.post2'
-        >>> DistributionMetadata._fullname('setup-tools', '1.0-r2')
-        'setup_tools-1.0.post2'
-        >>> DistributionMetadata._fullname('setup.tools', '1.0.post')
-        'setup_tools-1.0.post0'
-        >>> DistributionMetadata._fullname('setup.tools', '1.0+ubuntu-1')
-        'setup_tools-1.0+ubuntu.1'
+        When removing an entry point, if metadata is loaded
+        from an older version of Setuptools, that removed
+        entry point will attempt to be loaded and will fail.
+        See #2765 for more details.
         """
-        return "{}-{}".format(
-            canonicalize_name(name).replace('-', '_'),
-            canonicalize_version(version, strip_trailing_zero=False),
-        )
+        removed = {
+            # removed 2021-09-05
+            '2to3_doctests',
+        }
+        return ep.name in removed
 
-    def get_author(self) -> str | None:
-        return self.author
+    def _finalize_setup_keywords(self):
+        for ep in metadata.entry_points(group='distutils.setup_keywords'):
+            value = getattr(self, ep.name, None)
+            if value is not None:
+                ep.load()(self, ep.name, value)
 
-    def get_author_email(self) -> str | None:
-        return self.author_email
+    def get_egg_cache_dir(self) -> str:
+        from . import windows_support
 
-    def get_maintainer(self) -> str | None:
-        return self.maintainer
+        egg_cache_dir = os.path.join(os.curdir, '.eggs')
+        if not os.path.exists(egg_cache_dir):
+            os.mkdir(egg_cache_dir)
+            windows_support.hide_file(egg_cache_dir)
+            readme_txt_filename = os.path.join(egg_cache_dir, 'README.txt')
+            with open(readme_txt_filename, 'w', encoding="utf-8") as f:
+                f.write(
+                    'This directory contains eggs that were downloaded '
+                    'by setuptools to build, test, and run plug-ins.\n\n'
+                )
+                f.write(
+                    'This directory caches those eggs to prevent '
+                    'repeated downloads.\n\n'
+                )
+                f.write('However, it is safe to delete this directory.\n\n')
 
-    def get_maintainer_email(self) -> str | None:
-        return self.maintainer_email
+        return egg_cache_dir
 
-    def get_contact(self) -> str | None:
-        return self.maintainer or self.author
+    def fetch_build_egg(self, req):
+        """Fetch an egg needed for building"""
+        from .installer import fetch_build_egg
 
-    def get_contact_email(self) -> str | None:
-        return self.maintainer_email or self.author_email
+        return fetch_build_egg(self, req)
 
-    def get_url(self) -> str | None:
-        return self.url
+    def get_command_class(self, command: str) -> type[distutils.cmd.Command]:  # type: ignore[override] # Not doing complex overrides yet
+        """Pluggable version of get_command_class()"""
+        if command in self.cmdclass:
+            return self.cmdclass[command]
 
-    def get_license(self) -> str | None:
-        return self.license
+        # Special case bdist_wheel so it's never loaded from "wheel"
+        if command == 'bdist_wheel':
+            from .command.bdist_wheel import bdist_wheel
 
-    get_licence = get_license
+            return bdist_wheel
 
-    def get_description(self) -> str | None:
-        return self.description
+        eps = metadata.entry_points(group='distutils.commands', name=command)
+        for ep in eps:
+            self.cmdclass[command] = cmdclass = ep.load()
+            return cmdclass
+        else:
+            return _Distribution.get_command_class(self, command)
 
-    def get_long_description(self) -> str | None:
-        return self.long_description
+    def print_commands(self):
+        for ep in metadata.entry_points(group='distutils.commands'):
+            if ep.name not in self.cmdclass:
+                cmdclass = ep.load()
+                self.cmdclass[ep.name] = cmdclass
+        return _Distribution.print_commands(self)
 
-    def get_keywords(self) -> str | list[str]:
-        return self.keywords or []
+    def get_command_list(self):
+        for ep in metadata.entry_points(group='distutils.commands'):
+            if ep.name not in self.cmdclass:
+                cmdclass = ep.load()
+                self.cmdclass[ep.name] = cmdclass
+        return _Distribution.get_command_list(self)
 
-    def set_keywords(self, value: str | Iterable[str]) -> None:
-        self.keywords = _ensure_list(value, 'keywords')
+    def include(self, **attrs) -> None:
+        """Add items to distribution that are named in keyword arguments
 
-    def get_platforms(self) -> str | list[str] | None:
-        return self.platforms
+        For example, 'dist.include(py_modules=["x"])' would add 'x' to
+        the distribution's 'py_modules' attribute, if it was not already
+        there.
 
-    def set_platforms(self, value: str | Iterable[str]) -> None:
-        self.platforms = _ensure_list(value, 'platforms')
+        Currently, this method only supports inclusion for attributes that are
+        lists or tuples.  If you need to add support for adding to other
+        attributes in this or a subclass, you can add an '_include_X' method,
+        where 'X' is the name of the attribute.  The method will be called with
+        the value passed to 'include()'.  So, 'dist.include(foo={"bar":"baz"})'
+        will try to call 'dist._include_foo({"bar":"baz"})', which can then
+        handle whatever special inclusion logic is needed.
+        """
+        for k, v in attrs.items():
+            include = getattr(self, '_include_' + k, None)
+            if include:
+                include(v)
+            else:
+                self._include_misc(k, v)
 
-    def get_classifiers(self) -> str | list[str]:
-        return self.classifiers or []
+    def exclude_package(self, package: str) -> None:
+        """Remove packages, modules, and extensions in named package"""
 
-    def set_classifiers(self, value: str | Iterable[str]) -> None:
-        self.classifiers = _ensure_list(value, 'classifiers')
+        pfx = package + '.'
+        if self.packages:
+            self.packages = [
+                p for p in self.packages if p != package and not p.startswith(pfx)
+            ]
 
-    def get_download_url(self) -> str | None:
-        return self.download_url
+        if self.py_modules:
+            self.py_modules = [
+                p for p in self.py_modules if p != package and not p.startswith(pfx)
+            ]
 
-    # PEP 314
-    def get_requires(self) -> str | list[str]:
-        return self.requires or []
+        if self.ext_modules:
+            self.ext_modules = [
+                p
+                for p in self.ext_modules
+                if p.name != package and not p.name.startswith(pfx)
+            ]
 
-    def set_requires(self, value: Iterable[str]) -> None:
-        import distutils.versionpredicate
+    def has_contents_for(self, package: str) -> bool:
+        """Return true if 'exclude_package(package)' would do something"""
 
-        for v in value:
-            distutils.versionpredicate.VersionPredicate(v)
-        self.requires = list(value)
+        pfx = package + '.'
 
-    def get_provides(self) -> str | list[str]:
-        return self.provides or []
+        for p in self.iter_distribution_names():
+            if p == package or p.startswith(pfx):
+                return True
 
-    def set_provides(self, value: Iterable[str]) -> None:
-        value = [v.strip() for v in value]
-        for v in value:
-            import distutils.versionpredicate
+        return False
 
-            distutils.versionpredicate.split_provision(v)
-        self.provides = value
+    def _exclude_misc(self, name: str, value: _Sequence) -> None:
+        """Handle 'exclude()' for list/tuple attrs without a special handler"""
+        if not isinstance(value, _sequence):
+            raise DistutilsSetupError(
+                f"{name}: setting must be of type <{_sequence_type_repr}> (got {value!r})"
+            )
+        try:
+            old = getattr(self, name)
+        except AttributeError as e:
+            raise DistutilsSetupError(f"{name}: No such distribution setting") from e
+        if old is not None and not isinstance(old, _sequence):
+            raise DistutilsSetupError(
+                name + ": this setting cannot be changed via include/exclude"
+            )
+        elif old:
+            setattr(self, name, [item for item in old if item not in value])
 
-    def get_obsoletes(self) -> str | list[str]:
-        return self.obsoletes or []
+    def _include_misc(self, name: str, value: _Sequence) -> None:
+        """Handle 'include()' for list/tuple attrs without a special handler"""
 
-    def set_obsoletes(self, value: Iterable[str]) -> None:
-        import distutils.versionpredicate
+        if not isinstance(value, _sequence):
+            raise DistutilsSetupError(
+                f"{name}: setting must be of type <{_sequence_type_repr}> (got {value!r})"
+            )
+        try:
+            old = getattr(self, name)
+        except AttributeError as e:
+            raise DistutilsSetupError(f"{name}: No such distribution setting") from e
+        if old is None:
+            setattr(self, name, value)
+        elif not isinstance(old, _sequence):
+            raise DistutilsSetupError(
+                name + ": this setting cannot be changed via include/exclude"
+            )
+        else:
+            new = [item for item in value if item not in old]
+            setattr(self, name, list(old) + new)
 
-        for v in value:
-            distutils.versionpredicate.VersionPredicate(v)
-        self.obsoletes = list(value)
+    def exclude(self, **attrs) -> None:
+        """Remove items from distribution that are named in keyword arguments
+
+        For example, 'dist.exclude(py_modules=["x"])' would remove 'x' from
+        the distribution's 'py_modules' attribute.  Excluding packages uses
+        the 'exclude_package()' method, so all of the package's contained
+        packages, modules, and extensions are also excluded.
+
+        Currently, this method only supports exclusion from attributes that are
+        lists or tuples.  If you need to add support for excluding from other
+        attributes in this or a subclass, you can add an '_exclude_X' method,
+        where 'X' is the name of the attribute.  The method will be called with
+        the value passed to 'exclude()'.  So, 'dist.exclude(foo={"bar":"baz"})'
+        will try to call 'dist._exclude_foo({"bar":"baz"})', which can then
+        handle whatever special exclusion logic is needed.
+        """
+        for k, v in attrs.items():
+            exclude = getattr(self, '_exclude_' + k, None)
+            if exclude:
+                exclude(v)
+            else:
+                self._exclude_misc(k, v)
+
+    def _exclude_packages(self, packages: _Sequence) -> None:
+        if not isinstance(packages, _sequence):
+            raise DistutilsSetupError(
+                f"packages: setting must be of type <{_sequence_type_repr}> (got {packages!r})"
+            )
+        list(map(self.exclude_package, packages))
+
+    def _parse_command_opts(self, parser, args):
+        # Remove --with-X/--without-X options when processing command args
+        self.global_options = self.__class__.global_options
+        self.negative_opt = self.__class__.negative_opt
+
+        # First, expand any aliases
+        command = args[0]
+        aliases = self.get_option_dict('aliases')
+        while command in aliases:
+            _src, alias = aliases[command]
+            del aliases[command]  # ensure each alias can expand only once!
+            import shlex
+
+            args[:1] = shlex.split(alias, True)
+            command = args[0]
+
+        nargs = _Distribution._parse_command_opts(self, parser, args)
+
+        # Handle commands that want to consume all remaining arguments
+        cmd_class = self.get_command_class(command)
+        if getattr(cmd_class, 'command_consumes_arguments', None):
+            self.get_option_dict(command)['args'] = ("command line", nargs)
+            if nargs is not None:
+                return []
+
+        return nargs
+
+    def get_cmdline_options(self) -> dict[str, dict[str, str | None]]:
+        """Return a '{cmd: {opt:val}}' map of all command-line options
+
+        Option names are all long, but do not include the leading '--', and
+        contain dashes rather than underscores.  If the option doesn't take
+        an argument (e.g. '--quiet'), the 'val' is 'None'.
+
+        Note that options provided by config files are intentionally excluded.
+        """
+
+        d: dict[str, dict[str, str | None]] = {}
+
+        for cmd, opts in self.command_options.items():
+            val: str | None
+            for opt, (src, val) in opts.items():
+                if src != "command line":
+                    continue
+
+                opt = opt.replace('_', '-')
+
+                if val == 0:
+                    cmdobj = self.get_command_obj(cmd)
+                    neg_opt = self.negative_opt.copy()
+                    neg_opt.update(getattr(cmdobj, 'negative_opt', {}))
+                    for neg, pos in neg_opt.items():
+                        if pos == opt:
+                            opt = neg
+                            val = None
+                            break
+                    else:
+                        raise AssertionError("Shouldn't be able to get here")
+
+                elif val == 1:
+                    val = None
+
+                d.setdefault(cmd, {})[opt] = val
+
+        return d
+
+    def iter_distribution_names(self) -> Iterator[str]:
+        """Yield all packages, modules, and extension names in distribution"""
+
+        yield from self.packages or ()
+
+        yield from self.py_modules or ()
+
+        for ext in self.ext_modules or ():
+            if isinstance(ext, tuple):
+                name, _buildinfo = ext
+            else:
+                name = ext.name
+            name = name.removesuffix('module')
+            yield name
+
+    def handle_display_options(self, option_order):
+        """If there were any non-global "display-only" options
+        (--help-commands or the metadata display options) on the command
+        line, display the requested info and return true; else return
+        false.
+        """
+        import sys
+
+        if self.help_commands:
+            return _Distribution.handle_display_options(self, option_order)
+
+        # Stdout may be StringIO (e.g. in tests)
+        if not isinstance(sys.stdout, io.TextIOWrapper):
+            return _Distribution.handle_display_options(self, option_order)
+
+        # Don't wrap stdout if utf-8 is already the encoding. Provides
+        #  workaround for #334.
+        if sys.stdout.encoding.lower() in ('utf-8', 'utf8'):
+            return _Distribution.handle_display_options(self, option_order)
+
+        # Print metadata in UTF-8 no matter the platform
+        encoding = sys.stdout.encoding
+        sys.stdout.reconfigure(encoding='utf-8')
+        try:
+            return _Distribution.handle_display_options(self, option_order)
+        finally:
+            sys.stdout.reconfigure(encoding=encoding)
+
+    def run_command(self, command) -> None:
+        self.set_defaults()
+        # Postpone defaults until all explicit configuration is considered
+        # (setup() args, config files, command line and plugins)
+
+        super().run_command(command)
 
 
-def fix_help_options(options):
-    """Convert a 4-tuple 'help_options' list as found in various command
-    classes to the 3-tuple form required by FancyGetopt.
-    """
-    return [opt[0:3] for opt in options]
+@functools.cache
+def _setuptools_commands() -> set[str]:
+    try:
+        # Use older API for importlib.metadata compatibility
+        entry_points = metadata.distribution('setuptools').entry_points
+        eps: Iterable[str] = (ep.name for ep in entry_points)
+    except metadata.PackageNotFoundError:
+        # during bootstrapping, distribution doesn't exist
+        eps = []
+    return {*distutils.command.__all__, *eps}
+
+
+class DistDeprecationWarning(SetuptoolsDeprecationWarning):
+    """Class for warning about deprecations in dist in
+    setuptools. Not ignored by default, unlike DeprecationWarning."""

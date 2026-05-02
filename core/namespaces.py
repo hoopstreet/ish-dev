@@ -1,90 +1,101 @@
-import ast
-import json
-import textwrap
-from pathlib import Path
+import itertools
+import os
+
+from .compat import py312
+
+from distutils import log
+
+flatten = itertools.chain.from_iterable
 
 
-def iter_namespace_pkgs(namespace):
-    parts = namespace.split(".")
-    for i in range(len(parts)):
-        yield ".".join(parts[: i + 1])
+class Installer:
+    nspkg_ext = '-nspkg.pth'
 
+    def install_namespaces(self) -> None:
+        nsp = self._get_all_ns_packages()
+        if not nsp:
+            return
+        filename = self._get_nspkg_file()
+        self.outputs.append(filename)
+        log.info("Installing %s", filename)
+        lines = map(self._gen_nspkg_line, nsp)
 
-def build_namespace_package(tmpdir, name, version="1.0", impl="pkg_resources"):
-    src_dir = tmpdir / name
-    src_dir.mkdir()
-    setup_py = src_dir / 'setup.py'
-    namespace, _, rest = name.rpartition('.')
-    namespaces = list(iter_namespace_pkgs(namespace))
-    setup_args = {
-        "name": name,
-        "version": version,
-        "packages": namespaces,
-    }
+        with open(filename, 'wt', encoding=py312.PTH_ENCODING) as f:
+            # Python<3.13 requires encoding="locale" instead of "utf-8"
+            # See: python/cpython#77102
+            f.writelines(lines)
 
-    if impl == "pkg_resources":
-        tmpl = '__import__("pkg_resources").declare_namespace(__name__)'
-        setup_args["namespace_packages"] = namespaces
-    elif impl == "pkgutil":
-        tmpl = '__path__ = __import__("pkgutil").extend_path(__path__, __name__)'
-    else:
-        raise ValueError(f"Cannot recognise {impl=} when creating namespaces")
+    def uninstall_namespaces(self) -> None:
+        filename = self._get_nspkg_file()
+        if not os.path.exists(filename):
+            return
+        log.info("Removing %s", filename)
+        os.remove(filename)
 
-    args = json.dumps(setup_args, indent=4)
-    assert ast.literal_eval(args)  # ensure it is valid Python
+    def _get_nspkg_file(self):
+        filename, _ = os.path.splitext(self._get_target())
+        return filename + self.nspkg_ext
 
-    script = textwrap.dedent(
-        """\
-        import setuptools
-        args = {args}
-        setuptools.setup(**args)
+    def _get_target(self):
+        return self.target
+
+    _nspkg_tmpl = (
+        "import sys, types, os",
+        "p = os.path.join(%(root)s, *%(pth)r)",
+        "importlib = __import__('importlib.util')",
+        "__import__('importlib.machinery')",
+        (
+            "m = "
+            "sys.modules.setdefault(%(pkg)r, "
+            "importlib.util.module_from_spec("
+            "importlib.machinery.PathFinder.find_spec(%(pkg)r, "
+            "[os.path.dirname(p)])))"
+        ),
+        ("m = m or sys.modules.setdefault(%(pkg)r, types.ModuleType(%(pkg)r))"),
+        "mp = (m or []) and m.__dict__.setdefault('__path__',[])",
+        "(p not in mp) and mp.append(p)",
+    )
+    "lines for the namespace installer"
+
+    _nspkg_tmpl_multi = ('m and setattr(sys.modules[%(parent)r], %(child)r, m)',)
+    "additional line(s) when a parent package is indicated"
+
+    def _get_root(self):
+        return "sys._getframe(1).f_locals['sitedir']"
+
+    def _gen_nspkg_line(self, pkg):
+        pth = tuple(pkg.split('.'))
+        root = self._get_root()
+        tmpl_lines = self._nspkg_tmpl
+        parent, sep, child = pkg.rpartition('.')
+        if parent:
+            tmpl_lines += self._nspkg_tmpl_multi
+        return ';'.join(tmpl_lines) % locals() + '\n'
+
+    def _get_all_ns_packages(self):
+        """Return sorted list of all package namespaces"""
+        pkgs = self.distribution.namespace_packages or []
+        return sorted(set(flatten(map(self._pkg_names, pkgs))))
+
+    @staticmethod
+    def _pkg_names(pkg):
         """
-    ).format(args=args)
-    setup_py.write_text(script, encoding='utf-8')
+        Given a namespace package, yield the components of that
+        package.
 
-    ns_pkg_dir = Path(src_dir, namespace.replace(".", "/"))
-    ns_pkg_dir.mkdir(parents=True)
-
-    for ns in namespaces:
-        pkg_init = src_dir / ns.replace(".", "/") / '__init__.py'
-        pkg_init.write_text(tmpl, encoding='utf-8')
-
-    pkg_mod = ns_pkg_dir / (rest + '.py')
-    some_functionality = 'name = {rest!r}'.format(**locals())
-    pkg_mod.write_text(some_functionality, encoding='utf-8')
-    return src_dir
-
-
-def build_pep420_namespace_package(tmpdir, name):
-    src_dir = tmpdir / name
-    src_dir.mkdir()
-    pyproject = src_dir / "pyproject.toml"
-    namespace, _, rest = name.rpartition(".")
-    script = f"""\
-        [build-system]
-        requires = ["setuptools"]
-        build-backend = "setuptools.build_meta"
-
-        [project]
-        name = "{name}"
-        version = "3.14159"
+        >>> names = Installer._pkg_names('a.b.c')
+        >>> set(names) == set(['a', 'a.b', 'a.b.c'])
+        True
         """
-    pyproject.write_text(textwrap.dedent(script), encoding='utf-8')
-    ns_pkg_dir = Path(src_dir, namespace.replace(".", "/"))
-    ns_pkg_dir.mkdir(parents=True)
-    pkg_mod = ns_pkg_dir / (rest + ".py")
-    some_functionality = f"name = {rest!r}"
-    pkg_mod.write_text(some_functionality, encoding='utf-8')
-    return src_dir
+        parts = pkg.split('.')
+        while parts:
+            yield '.'.join(parts)
+            parts.pop()
 
 
-def make_site_dir(target):
-    """
-    Add a sitecustomize.py module in target to cause
-    target to be added to site dirs such that .pth files
-    are processed there.
-    """
-    sc = target / 'sitecustomize.py'
-    target_str = str(target)
-    tmpl = '__import__("site").addsitedir({target_str!r})'
-    sc.write_text(tmpl.format(**locals()), encoding='utf-8')
+class DevelopInstaller(Installer):
+    def _get_root(self):
+        return repr(str(self.egg_path))
+
+    def _get_target(self):
+        return self.egg_link

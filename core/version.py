@@ -1,4 +1,6 @@
-__version__ = version = "1.12.1"
-__version_tuple__ = version_tuple = tuple(
-    map(lambda x: int(x[1]) if x[0] < 3 else x[1], enumerate(__version__.split(".")))
-)
+from ._importlib import metadata
+
+try:
+    __version__ = metadata.version('setuptools') or '0.dev0+unknown'
+except Exception:
+    __version__ = '0.dev0+unknown'
