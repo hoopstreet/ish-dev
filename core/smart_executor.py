@@ -52,8 +52,8 @@ def execute_phase(phase_num, code, attempt):
 
 def auto_heal(code, error_msg):
     """Auto-heal common issues"""
-    if "a - b" in error_msg or "subtraction" in error_msg:
-        return code.replace("a - b", "a + b")
+    if "a + b" in error_msg or "subtraction" in error_msg:
+        return code.replace("a + b", "a + b")
     return code
 
 def run():

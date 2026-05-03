@@ -1,0 +1,51 @@
+=============================================================================
+HOOPSTREET AI AGENT - PROFESSIONAL COMMANDS
+=============================================================================
+
+📌 QUICK COMMANDS (Type directly):
+
+   help / ?           - Show this guide
+   menu / exit        - Return to main menu
+   clear              - Clear screen
+
+📁 PROJECT ANALYSIS:
+
+   analyze / scan     - Full project analysis
+   status             - System status
+   logs               - Recent activity
+   dna                - Evolution log
+
+🧠 MEMORY COMMANDS:
+
+   remember [text]    - Save important info
+   recall / memory    - Show what I remember
+   forget             - Clear memory
+
+💻 CODE EXECUTION:
+
+   phase              - Multi-phase code (# Phase 1, # Phase 2)
+   run [command]      - Execute shell command
+   python [code]      - Execute Python code
+
+📄 FILE OPERATIONS:
+
+   read [file]        - Read file content
+   write [file] [txt] - Write to file
+   ls                 - List directory
+
+🔧 MAINTENANCE:
+
+   heal               - Auto-repair system
+   sync               - Git sync and backup
+
+=============================================================================
+💡 EXAMPLES:
+
+   ⚡ analyze project
+   ⚡ remember I'm working on iSH auto-healing agent
+   ⚡ what do you remember
+   ⚡ phase
+   ⚡ run echo "Hello"
+   ⚡ python print("Hello")
+
+=============================================================================
