@@ -9,4 +9,11 @@
     "response": "processed",
     "time": "2026-05-03 15:47:50.573697"
   }
-}
+}{"input":"mkdir -p core/_archive","output":"❌ Missing OpenRouter API Key"}
+{"input":"","output":"❌ Missing OpenRouter API Key"}
+{"input":"mv core/legacy core/_archive/legacy","output":"❌ Missing OpenRouter API Key"}
+{"input":"mv core/engine core/_archive/engine","output":"❌ Missing OpenRouter API Key"}
+{"input":"mv core/v2 core/_archive/v2 2>/dev/null","output":"❌ Missing OpenRouter API Key"}
+{"input":"mv core/v4 core/_archive/v4 2>/dev/null","output":"❌ Missing OpenRouter API Key"}
+{"input":"menu","output":"❌ Missing OpenRouter API Key"}
+{"input":"boot.sh","output":"Please provide the specific task you would like me to execute."}
