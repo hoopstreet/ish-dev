@@ -25,3 +25,8 @@
 {"input":"❌ Menu Option 1 is STILL calling OLD agent","output":"Please specify the task you'd like me to perform."}
 {"input":"❌ New OpenRouter agent exists, but boot.sh is not wired to it","output":"What would you like me to do?"}
 {"input":"❌ Multiple agent versions exist in repo (v7, v10, v13 conflicts)","output":"Please provide the details of the task you would like me to execute."}
+{"input":"","output":"Please provide the details of the task you would like me to execute."}
+{"input":"We fix this cleanly now.","output":"Please provide the details of the task you would like me to execute."}
+{"input":"","output":"Please provide the specific task or code that you would like me to execute."}
+{"input":"⸻","output":"Please provide the specific task you'd like the AI Operating System to execute."}
+{"input":"","output":"Please provide the specifics of the task you would like me to perform."}
