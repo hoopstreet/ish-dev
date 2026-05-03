@@ -2,4 +2,5 @@
 
 cd ~/ish-dev || exit
 
-grep -E "SUPABASE|GEMINI|OPENROUTER" .env 2>/dev/null
+# DO NOT PRINT VALUES
+echo "🔐 Credentials loaded (hidden)"

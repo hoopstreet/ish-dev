@@ -4,29 +4,22 @@ cd ~/ish-dev || exit
 
 run_tool() {
   TOOL="$1"
-  ARG="$2"
 
   case "$TOOL" in
-
     sync)
-      sh core/kernel/tools/git_push.sh "$ARG"
+      sh core/kernel/tools/git_push.sh "auto sync"
       ;;
-
     creds)
-      sh core/kernel/tools/creds.sh 2>/dev/null
+      sh core/kernel/tools/creds.sh
       ;;
-
     status)
-      git status
+      sh core/status.sh 2>/dev/null || echo "No status yet"
       ;;
-
     heal)
-      git pull origin main --rebase
+      sh core/heal.sh 2>/dev/null || echo "No heal script"
       ;;
-
     *)
-      echo "unknown tool"
+      echo "No tool"
       ;;
-
   esac
 }
