@@ -2,45 +2,25 @@
 
 cd ~/ish-dev || exit
 
-. core/kernel/ui/ui.sh
-. core/kernel/agents/safe_call.sh
-. core/kernel/rl/memory.sh
-. core/kernel/rl/score.sh
-. core/kernel/tools/router.sh
+. core/kernel/dag/v2/engine.sh
+. core/kernel/autogit/coder.sh
+. core/kernel/evolution/loop.sh
 
-echo "🤖 AI AGENT (FINAL OS MODE)"
-echo "Type 'exit' to return menu"
+echo "🧠 MULTI-AGENT OS v12"
+echo "Type exit to quit"
 
 while true; do
-  echo ""
   printf "AGENT> "
-  read -r INPUT
+  read INPUT
 
-  [ "$INPUT" = "exit" ] && break
+  [ "$INPUT" = "exit" ] && exit
 
-  log "Memory lookup..."
-  BEST=$(best_match "$INPUT")
+  # SYSTEM COMMANDS
+  echo "$INPUT" | grep -qi "sync" && sh core/kernel/tools/git_push.sh "agent sync"
+  echo "$INPUT" | grep -qi "heal" && sh core/heal.sh
+  echo "$INPUT" | grep -qi "trash" && sh core/kernel/brain.sh
 
-  if [ -n "$BEST" ]; then
-    echo "🧠 Memory:"
-    echo "💡 $BEST"
-    continue
-  fi
-
-  log "Thinking..."
-  OUTPUT=$(safe_call coder "$INPUT")
-
-  echo "💡 $OUTPUT"
-
-  SCORE=$(score "$OUTPUT")
-  echo "📊 Score: $SCORE"
-
-  store_memory "$INPUT" "$OUTPUT" "$SCORE"
-
-  # AUTO CONTROL
-  echo "$INPUT" | grep -qi "sync" && run_tool sync
-  echo "$INPUT" | grep -qi "heal" && run_tool heal
-  echo "$INPUT" | grep -qi "status" && run_tool status
-  echo "$INPUT" | grep -qi "remote" && run_tool remote
+  # DAG EXECUTION
+  run_parallel "$INPUT"
 
 done
