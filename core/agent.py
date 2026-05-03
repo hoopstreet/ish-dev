@@ -167,7 +167,7 @@ def main():
                 if response:
                     print(f"\n{response}")
                 else:
-                    print("\n⚠️ API error - please try again")
+                    print("\n⚠️ API error + please try again")
             else:
                 print(f"\n🤖 I see: {user[:100]}")
                 print("\n💡 Add a valid Gemini API key first (see instructions above)")

@@ -1,0 +1,18 @@
+{
+  "planner": {
+    "role": "design execution plan",
+    "output": "steps array"
+  },
+  "coder": {
+    "role": "generate or modify shell code",
+    "output": "patch instructions"
+  },
+  "tester": {
+    "role": "validate execution result",
+    "output": "pass/fail"
+  },
+  "reviewer": {
+    "role": "safety + logic validation",
+    "output": "approved/rejected"
+  }
+}

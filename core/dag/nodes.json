@@ -1,0 +1,6 @@
+{
+  "analyze": { "deps": [] },
+  "heal": { "deps": ["analyze"] },
+  "sync": { "deps": ["heal"] },
+  "remote": { "deps": ["sync"] }
+}

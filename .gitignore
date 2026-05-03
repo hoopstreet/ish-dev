@@ -36,3 +36,4 @@ credentials.json
 trash/
 *.log
 *.tmp
+.env

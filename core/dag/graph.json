@@ -1,0 +1,8 @@
+{
+  "nodes": {
+    "planner": [],
+    "coder": ["planner"],
+    "tester": ["coder"],
+    "reviewer": ["tester"]
+  }
+}

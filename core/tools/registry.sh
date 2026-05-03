@@ -1,0 +1,22 @@
+#!/bin/sh
+
+case "$1" in
+  analyze)
+    sh core/status.sh
+    ;;
+  heal)
+    sh core/heal.sh
+    ;;
+  sync)
+    sh core/sync.sh
+    ;;
+  remote)
+    sh core/remote.sh
+    ;;
+  creds)
+    sh core/creds.sh
+    ;;
+  *)
+    echo "❌ Unknown tool: $1"
+    ;;
+esac

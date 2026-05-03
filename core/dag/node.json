@@ -1,0 +1,7 @@
+{
+  "nodes": {
+    "analyze": { "deps": [] },
+    "heal": { "deps": ["analyze"] },
+    "sync": { "deps": ["heal"] }
+  }
+}
