@@ -2,25 +2,47 @@
 
 cd ~/ish-dev || exit
 
-. core/kernel/dag/v2/engine.sh
-. core/kernel/autogit/coder.sh
-. core/kernel/evolution/loop.sh
+. core/kernel/agents/safe_call.sh
 
-echo "🧠 MULTI-AGENT OS v12"
-echo "Type exit to quit"
+echo "🧠 ISH-DEV AI AGENT (OPENROUTER CORE)"
+echo "Type 'exit' to quit"
 
 while true; do
+  echo ""
   printf "AGENT> "
-  read INPUT
+  read -r INPUT
 
   [ "$INPUT" = "exit" ] && exit
 
-  # SYSTEM COMMANDS
-  echo "$INPUT" | grep -qi "sync" && sh core/kernel/tools/git_push.sh "agent sync"
-  echo "$INPUT" | grep -qi "heal" && sh core/heal.sh
-  echo "$INPUT" | grep -qi "trash" && sh core/kernel/brain.sh
+  # 🧠 THINK (PLAN)
+  PLAN=$(safe_call planner "$INPUT")
 
-  # DAG EXECUTION
-  run_parallel "$INPUT"
+  # ⚙️ DECIDE ACTION
+  ACTION=$(safe_call coder "Return ONLY one word: sync, heal, creds, status, none. Task: $PLAN")
 
+  case "$ACTION" in
+    *sync*)
+      echo "🔄 SYNC TRIGGERED"
+      sh core/kernel/tools/git_push.sh "auto: $INPUT"
+      ;;
+
+    *heal*)
+      echo "🔧 RUNNING HEAL"
+      sh core/heal.sh
+      ;;
+
+    *creds*)
+      echo "🔐 OPEN CREDENTIALS"
+      sh core/kernel/tools/creds.sh
+      ;;
+
+    *status*)
+      sh core/status.sh
+      ;;
+  esac
+
+  # 🧠 FINAL OUTPUT ONLY
+  OUTPUT=$(safe_call coder "$PLAN")
+
+  echo "💡 $OUTPUT"
 done
