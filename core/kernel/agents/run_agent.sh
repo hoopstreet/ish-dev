@@ -8,7 +8,7 @@ cd ~/ish-dev || exit
 . core/kernel/rl/score.sh
 . core/kernel/tools/router.sh
 
-echo "🤖 AI AGENT (RL v2 ACTIVE)"
+echo "🤖 AI AGENT (FINAL OS MODE)"
 echo "Type 'exit' to return menu"
 
 while true; do
@@ -18,7 +18,7 @@ while true; do
 
   [ "$INPUT" = "exit" ] && break
 
-  log "Checking memory..."
+  log "Memory lookup..."
   BEST=$(best_match "$INPUT")
 
   if [ -n "$BEST" ]; then
@@ -37,8 +37,10 @@ while true; do
 
   store_memory "$INPUT" "$OUTPUT" "$SCORE"
 
-  # AUTO ACTION
+  # AUTO CONTROL
   echo "$INPUT" | grep -qi "sync" && run_tool sync
   echo "$INPUT" | grep -qi "heal" && run_tool heal
+  echo "$INPUT" | grep -qi "status" && run_tool status
+  echo "$INPUT" | grep -qi "remote" && run_tool remote
 
 done

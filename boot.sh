@@ -21,38 +21,14 @@ read MODE
 
 case "$MODE" in
 
-  1)
-    sh core/kernel/agents/run_agent.sh
-    ;;
-
-  2)
-    sh core/kernel/tools/git_push.sh "manual sync"
-    ;;
-
-  3)
-    sh core/heal.sh 2>/dev/null || echo "No heal yet"
-    ;;
-
-  4)
-    echo "📊 Logs:"
-    tail -n 10 core/kernel/memory/store.log 2>/dev/null
-    ;;
-
-  5)
-    git remote -v
-    ;;
-
-  6)
-    sh core/kernel/tools/creds.sh
-    ;;
-
-  0)
-    exit
-    ;;
-
-  *)
-    echo "❌ Invalid"
-    ;;
+  1) sh core/kernel/agents/run_agent.sh ;;
+  2) sh core/kernel/tools/git_push.sh "manual sync" ;;
+  3) sh core/heal.sh ;;
+  4) sh core/status.sh ;;
+  5) sh core/remote.sh ;;
+  6) sh core/kernel/tools/creds.sh ;;
+  0) exit ;;
+  *) echo "❌ Invalid" ;;
 
 esac
 

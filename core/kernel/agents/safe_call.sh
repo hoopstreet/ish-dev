@@ -3,5 +3,9 @@
 cd ~/ish-dev || exit
 
 safe_call() {
-  echo "$2"  # fallback if API fails
+  ROLE="$1"
+  INPUT="$2"
+
+  # Fallback (safe mode)
+  echo "$INPUT"
 }
