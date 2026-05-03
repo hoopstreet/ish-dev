@@ -1,10 +1,9 @@
-#!/bin/sh
+#!/bin/bash
 
 while true; do
-    printf "\033[2J\033[H"
-    
+    clear
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📲 HOOPSTREET ISH-DEV DASHBOARD v10.0.9"
+    echo "📲 HOOPSTREET ISH-DEV DASHBOARD v10.0.8"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📋 MAIN MENU OPTIONS:"
     echo "   1. 🤖 Agent          - AI Assistant"
@@ -15,25 +14,18 @@ while true; do
     echo "   6. 🔐 Credentials    - Token Manager"
     echo "   0. 🚪 Exit           - Back to shell"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
     printf "👉 Choose (0-6): "
     read choice
 
-    case "$choice" in
-        1) clear; python3 /root/ish-dev/core/agent_self_improving.py ;;
-        2) clear; /root/ish-dev/core/sync.sh ;;
-        3) clear; /root/ish-dev/core/heal.sh ;;
-        4) clear; /root/ish-dev/core/status.sh ;;
-        5) clear; /root/ish-dev/core/remote.sh ;;
-        6) clear; /root/ish-dev/core/creds.sh ;;
-        0) 
-            echo ""
-            echo "👋 Back to shell. Type 'menu' to return."
-            echo "localhost:~#"
-            exit 0
-            ;;
-        *) 
-            echo "❌ Invalid. Enter 0-6"
-            sleep 1
-            ;;
+    case $choice in
+        1) python3 core/agent_self_improving.py ;;
+        2) bash core/sync.sh ;;
+        3) bash core/heal.sh ;;
+        4) bash core/status.sh ;;
+        5) bash core/remote.sh ;;
+        6) bash core/creds.sh ;;
+        0) echo "👋 Back to shell. Type 'menu' to return."; exit 0 ;;
+        *) echo "❌ Invalid option"; sleep 1 ;;
     esac
 done
