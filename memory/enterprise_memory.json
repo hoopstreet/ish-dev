@@ -17,3 +17,11 @@
 {"input":"mv core/v4 core/_archive/v4 2>/dev/null","output":"❌ Missing OpenRouter API Key"}
 {"input":"menu","output":"❌ Missing OpenRouter API Key"}
 {"input":"boot.sh","output":"Please provide the specific task you would like me to execute."}
+{"input":"merge everything and get the reusable upgradea","output":"I'm ready to assist you with any coding task you need help with. Please provide the specific instructions or code you would like me to execute or help you with."}
+{"input":"Good — now we’ve reached the real integration problem (not AI anymore, just routing + file wiring).","output":"Please provide the details of the task you would like me to execute."}
+{"input":"","output":"Please provide the specific task you would like me to execute."}
+{"input":"Right now your issue is simple:","output":"Please specify the task you would like me to execute."}
+{"input":"","output":"Please provide the details or specific instructions for the task you would like me to execute."}
+{"input":"❌ Menu Option 1 is STILL calling OLD agent","output":"Please specify the task you'd like me to perform."}
+{"input":"❌ New OpenRouter agent exists, but boot.sh is not wired to it","output":"What would you like me to do?"}
+{"input":"❌ Multiple agent versions exist in repo (v7, v10, v13 conflicts)","output":"Please provide the details of the task you would like me to execute."}
