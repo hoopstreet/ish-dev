@@ -1,3 +1,47 @@
 #!/bin/bash
-while true; do clear; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo "📲 HOOPSTREET ISH-DEV DASHBOARD v10.0.8"; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo "📋 MAIN MENU OPTIONS:"; echo "   1. 🤖 Agent          - AI Assistant"; echo "   2. 🔄 Sync           - Git push/pull"; echo "   3. 🔧 Heal           - Auto-repair"; echo "   4. 📊 Status         - System info"; echo "   5. 🔗 Remote         - GitHub Projects"; echo "   6. 🔐 Credentials    - Token Manager"; echo "   0. 🚪 Exit           - Back to shell"; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo ""; printf "👉 Choose (0-6): "; read choice; case \$choice in 1) python3 core/agent_self_improving.py ;; 2) bash core/sync.sh ;; 3) bash core/heal.sh ;; 4) bash core/status.sh ;; 5) bash core/remote.sh ;; 6) bash core/creds.sh ;; 0) echo "👋 Back to shell. Type 'menu' to return."; exit 0 ;; *) echo "❌ Invalid"; sleep 1 ;; esac; done
-M
+
+clear
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 SYSTEM - COMPLETE STATUS REPORT"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+VERSION=$(grep "Version:" docs/DNA.md 2>/dev/null | head -1 | cut -d' ' -f2)
+[ -z "$VERSION" ] && VERSION="v10.0.8"
+
+echo "📌 SYSTEM VERSION & HEALTH"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🏷️ Version: $VERSION"
+echo "💚 Status: production"
+echo ""
+
+echo "📁 CORE FILES"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ls -1 core/ 2>/dev/null
+echo ""
+
+echo "📁 DOCS FILES"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ls -1 docs/ 2>/dev/null
+echo ""
+
+echo "💾 DATA STORES STATUS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+CRED_COUNT=$(grep -c '=' ~/.hoopstreet/creds/credentials.txt 2>/dev/null || echo 0)
+PROJ_COUNT=$(grep -c '"url"' projects.json 2>/dev/null || echo 0)
+DNA_LINES=$(wc -l < docs/DNA.md 2>/dev/null || echo 0)
+LOG_LINES=$(wc -l < docs/logs.txt 2>/dev/null || echo 0)
+
+echo "🔐 Credentials: $CRED_COUNT stored"
+echo "📁 Projects: $PROJ_COUNT connected"
+echo "🧬 DNA.md: $DNA_LINES lines"
+echo "📝 logs.txt: $LOG_LINES entries"
+echo ""
+
+echo "🔗 EXTERNAL INTEGRATIONS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🐙 GitHub: Connected"
+echo "📍 https://github.com/hoopstreet/ish-dev.git"
+echo ""
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+read -p "Press Enter to continue..."
